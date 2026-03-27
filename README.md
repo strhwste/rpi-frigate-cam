@@ -14,6 +14,7 @@ Turn a Raspberry Pi (3/4/5) with **any camera** into a dedicated, low-resource R
 - **Bird quality mode** — optional `--denoise cdn-hq --awb auto` flags for sharper, colour-accurate still captures on Pi cameras
 - **Wi-Fi adaptive** — automatically lowers framerate when signal drops
 - **Home Assistant MQTT discovery** — CPU temp, RAM, stream status, Wi-Fi quality, resolution, and FPS sensors + restart/update buttons
+- **MQTT camera settings control** — change resolution, framerate, white balance, denoise, exposure mode, EV, and shutter speed live via MQTT without re-running setup
 - **Auto-update** — daily cron checks this repo for script updates
 - **Systemd managed** — auto-start on boot, restart on failure
 - **Idempotent** — safe to re-run; backs up existing config files
@@ -153,14 +154,17 @@ Lower framerate + higher resolution is the recommended strategy for catching sha
 
 The setup script automatically suggests lower fps defaults when you pick a higher resolution.
 
-**Bird quality mode** (Pi cameras only) adds two extra rpicam-vid flags:
+**Bird quality mode** (Pi cameras only) adds extra rpicam-vid flags at setup time.  All of these can be changed later via MQTT without re-running setup:
 
-| Flag | Effect |
-|------|--------|
-| `--denoise cdn-hq` | High-quality chroma-domain noise reduction — noticeably sharper feather detail |
-| `--awb auto` | Automatic white-balance — corrects colour cast in outdoor/shade scenes |
+| Flag / Setting | Effect | MQTT topic |
+|------|--------|------------|
+| `--awb auto` | Automatic white-balance — corrects colour cast in outdoor/shade scenes | `.../camera/awb/set` |
+| `--denoise cdn-hq` | High-quality chroma-domain noise reduction — noticeably sharper feather detail | `.../camera/denoise/set` |
+| `--exposure normal` | Exposure profile (normal / sport / long / custom) | `.../camera/exposure/set` |
+| `--ev 0` | Exposure compensation (−10 to +10) | `.../camera/ev/set` |
+| `--shutter 0` | Shutter speed in µs (0 = auto) | `.../camera/shutter/set` |
 
-Enable it at the interactive prompt during setup (default: yes). The extra CPU cost is ~5–10 % on a Pi 4.
+Enable bird quality mode at the interactive prompt during setup (default: yes). The extra CPU cost is ~5–10 % on a Pi 4.
 
 ## MQTT Integration
 
@@ -175,12 +179,62 @@ The MQTT integration is built directly on **`mosquitto_pub` / `mosquitto_sub`** 
 | RAM Usage | Sensor | % from `free` |
 | Stream Status | Binary sensor | ON when go2rtc is active |
 | Wi-Fi Quality | Sensor | 0–100 % link quality (iwconfig) |
-| Stream Resolution | Sensor | e.g. `1920x1080` |
-| Stream FPS | Sensor | Configured fps value |
+| Stream Resolution | Sensor | e.g. `1920x1080` (read-only) |
+| Stream FPS | Sensor | Configured fps value (read-only) |
 | Restart Stream | Button | Sends `restart` to command topic |
 | Update Birdcam | Button | Sends `update` to command topic |
+| Set Resolution | Text | Change resolution live (e.g. `1920x1080`) |
+| Set FPS | Number | Change framerate live (1–120) |
+| White Balance | Select | AWB mode — Pi cameras only |
+| Denoise | Select | Noise reduction level — Pi cameras only |
+| Exposure Mode | Select | Exposure profile — Pi cameras only |
+| Exposure Compensation (EV) | Number | EV offset (−10 to +10, step 0.5) — Pi cameras only |
+| Shutter Speed | Number | Shutter in µs (0 = auto) — Pi cameras only |
 
 State is published every 30 seconds to `birdcam/<hostname>/state`.  Commands are consumed from `birdcam/<hostname>/cmd`.
+
+### Camera settings via MQTT
+
+Camera settings can be changed at any time without re-running setup.  Each change updates `/etc/birdcam.conf`, rewrites `go2rtc.yaml`, and restarts the stream automatically.
+
+**Topics** — publish a plain-text value to the corresponding topic:
+
+| Setting | Topic | Example value |
+|---------|-------|---------------|
+| Resolution | `birdcam/<hostname>/camera/resolution/set` | `1920x1080` |
+| FPS | `birdcam/<hostname>/camera/fps/set` | `15` |
+| White balance | `birdcam/<hostname>/camera/awb/set` | `auto` |
+| Denoise | `birdcam/<hostname>/camera/denoise/set` | `cdn-hq` |
+| Exposure mode | `birdcam/<hostname>/camera/exposure/set` | `normal` |
+| Exposure comp. | `birdcam/<hostname>/camera/ev/set` | `-1.5` |
+| Shutter speed | `birdcam/<hostname>/camera/shutter/set` | `20000` |
+
+**Valid values:**
+
+| Setting | Valid values |
+|---------|-------------|
+| `awb` | `off`, `auto`, `incandescent`, `tungsten`, `fluorescent`, `indoor`, `daylight`, `cloudy` |
+| `denoise` | `off`, `cdn-off`, `cdn-fast`, `cdn-hq` |
+| `exposure` | `normal`, `sport`, `long`, `custom` |
+| `ev` | `-10` … `10` (decimals accepted, e.g. `0.5`) |
+| `shutter` | `0` (auto) or any positive integer in µs |
+
+**Example — change to 1080p at 10 fps with sport exposure via `mosquitto_pub`:**
+
+```bash
+BROKER=192.168.1.10
+HOST=birdcam-pi          # output of: hostname -s
+
+mosquitto_pub -h $BROKER -t "birdcam/$HOST/camera/resolution/set" -m "1920x1080"
+mosquitto_pub -h $BROKER -t "birdcam/$HOST/camera/fps/set"        -m "10"
+mosquitto_pub -h $BROKER -t "birdcam/$HOST/camera/exposure/set"   -m "sport"
+```
+
+Current values are published to the matching `.../state` topics (e.g. `birdcam/<hostname>/camera/fps/state`) so Home Assistant entities reflect the live configuration.
+
+> **Note:** White balance, denoise, exposure mode, EV, and shutter speed controls apply only to Pi cameras (rpicam-vid).  USB cameras support resolution and FPS changes only.
+
+> **Note:** The `text` entity type used for the resolution control requires Home Assistant 2023.7 or later.
 
 ## Configuration Files
 

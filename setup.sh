@@ -482,23 +482,28 @@ esac
 
 ok "Framerate: ${FPS} fps"
 
-# ─── Bird photography quality flags (Pi camera only) ─────────────────────────
-# High-quality denoise and auto white-balance improve individual frame detail
-# at high resolutions, especially useful for still/close-up bird captures.
-# The extra processing adds ~5-10% CPU but noticeably sharpens images.
-BIRD_QUALITY_FLAGS=""
+# ─── Pi camera quality settings ──────────────────────────────────────────────
+# Individual settings allow fine-grained control and can be updated via MQTT
+# after setup without re-running the installer.
+AWB_MODE="auto"
+DENOISE_MODE="off"
+EXPOSURE_MODE="normal"
+EV_VALUE="0"
+SHUTTER_SPEED="0"
 if [[ "${CAM_TYPE}" == "pi" ]]; then
     echo ""
     echo -e "${BOLD}Bird photography quality optimisation (Pi camera only):${NC}"
-    echo "  Adds --denoise cdn-hq and --awb auto for sharper, colour-accurate frames."
+    echo "  Enables --denoise cdn-hq and --awb auto for sharper, colour-accurate frames."
     echo "  Recommended when fps ≤ 15 and resolution ≥ 1080p."
-    read -r -p "  Enable bird quality flags? [Y/n]: " BIRD_QUALITY
+    echo "  All settings can be changed at any time via MQTT."
+    read -r -p "  Enable bird quality mode? [Y/n]: " BIRD_QUALITY
     BIRD_QUALITY="${BIRD_QUALITY:-y}"
     if [[ "${BIRD_QUALITY,,}" == "y" ]]; then
-        BIRD_QUALITY_FLAGS="--denoise cdn-hq --awb auto"
-        ok "Bird quality flags enabled (--denoise cdn-hq --awb auto)."
+        AWB_MODE="auto"
+        DENOISE_MODE="cdn-hq"
+        ok "Bird quality mode enabled (awb=auto, denoise=cdn-hq). Adjustable via MQTT."
     else
-        info "Bird quality flags disabled."
+        info "Bird quality mode disabled (denoise=off). Adjustable via MQTT."
     fi
 fi
 
@@ -563,7 +568,11 @@ MQTT_PORT="${MQTT_PORT}"
 MQTT_USER="${MQTT_USER}"
 MQTT_PASS="${MQTT_PASS}"
 MQTT_TOPIC_PREFIX="${MQTT_TOPIC_PREFIX}"
-BIRD_QUALITY_FLAGS="${BIRD_QUALITY_FLAGS}"
+AWB_MODE="${AWB_MODE}"
+DENOISE_MODE="${DENOISE_MODE}"
+EXPOSURE_MODE="${EXPOSURE_MODE}"
+EV_VALUE="${EV_VALUE}"
+SHUTTER_SPEED="${SHUTTER_SPEED}"
 BIRDCAM_EOF
 
 chmod 600 "${BIRDCAM_CONF}"
@@ -654,7 +663,11 @@ else
     # Pi Camera — CAM_CMD includes the exec: prefix for consistency
     CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
     CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
-    [[ -n "${BIRD_QUALITY_FLAGS}" ]] && CAM_CMD+=" ${BIRD_QUALITY_FLAGS}"
+    CAM_CMD+=" --awb ${AWB_MODE}"
+    [[ "${DENOISE_MODE}" != "off" ]] && CAM_CMD+=" --denoise ${DENOISE_MODE}"
+    [[ "${EXPOSURE_MODE}" != "normal" ]] && CAM_CMD+=" --exposure ${EXPOSURE_MODE}"
+    [[ "${EV_VALUE}" != "0" ]] && CAM_CMD+=" --ev ${EV_VALUE}"
+    [[ "${SHUTTER_SPEED}" != "0" ]] && CAM_CMD+=" --shutter ${SHUTTER_SPEED}"
     CAM_CMD+=" --libav-format h264"
     CAM_CMD+=" -o -"
 fi
@@ -762,7 +775,11 @@ CAM_DEVICE="${CAM_DEVICE:-}"
 USB_HAS_H264="${USB_HAS_H264:-false}"
 USB_HAS_MJPEG="${USB_HAS_MJPEG:-false}"
 STREAM_NAME="${STREAM_NAME:-birdcam}"
-BIRD_QUALITY_FLAGS="${BIRD_QUALITY_FLAGS:-}"
+AWB_MODE="${AWB_MODE:-auto}"
+DENOISE_MODE="${DENOISE_MODE:-off}"
+EXPOSURE_MODE="${EXPOSURE_MODE:-normal}"
+EV_VALUE="${EV_VALUE:-0}"
+SHUTTER_SPEED="${SHUTTER_SPEED:-0}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
 
@@ -796,9 +813,14 @@ build_cam_cmd() {
             echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
         fi
     else
-        local quality_flags=""
-        [[ -n "${BIRD_QUALITY_FLAGS}" ]] && quality_flags=" ${BIRD_QUALITY_FLAGS}"
-        echo "exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}${quality_flags} --libav-format h264 -o -"
+        local pi_cmd="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}"
+        pi_cmd+=" --awb ${AWB_MODE:-auto}"
+        [[ "${DENOISE_MODE:-off}" != "off" ]] && pi_cmd+=" --denoise ${DENOISE_MODE:-off}"
+        [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
+        [[ "${EV_VALUE:-0}" != "0" ]] && pi_cmd+=" --ev ${EV_VALUE:-0}"
+        [[ "${SHUTTER_SPEED:-0}" != "0" ]] && pi_cmd+=" --shutter ${SHUTTER_SPEED:-0}"
+        pi_cmd+=" --libav-format h264 -o -"
+        echo "${pi_cmd}"
     fi
 }
 
@@ -887,11 +909,12 @@ header "Step 8: Home Assistant MQTT Discovery & Watchdog"
 
 cat > "${MQTT_DISCOVERY_SCRIPT}" <<'MQTT_DISC_EOF'
 #!/bin/bash
-# birdcam-mqtt-discovery.sh — Publishes HA MQTT auto-discovery messages
-# and periodically sends system stats (CPU, RAM, temperature).
+# birdcam-mqtt-discovery.sh — Publishes HA MQTT auto-discovery messages,
+# periodically sends system stats, and handles camera settings via MQTT.
 set -euo pipefail
 
 CONF="/etc/birdcam.conf"
+# shellcheck disable=SC1090
 [[ -f "${CONF}" ]] && source "${CONF}"
 
 MQTT_ENABLED="${MQTT_ENABLED:-n}"
@@ -903,11 +926,30 @@ MQTT_USER="${MQTT_USER:-}"
 MQTT_PASS="${MQTT_PASS:-}"
 MQTT_TOPIC_PREFIX="${MQTT_TOPIC_PREFIX:-homeassistant}"
 
+# Camera settings defaults (backward-compatible with old conf)
+FPS="${FPS:-15}"
+WIDTH="${WIDTH:-1280}"
+HEIGHT="${HEIGHT:-720}"
+CAM_TYPE="${CAM_TYPE:-pi}"
+CAM_TOOL="${CAM_TOOL:-rpicam-vid}"
+CAM_DEVICE="${CAM_DEVICE:-}"
+USB_HAS_H264="${USB_HAS_H264:-false}"
+USB_HAS_MJPEG="${USB_HAS_MJPEG:-false}"
+STREAM_NAME="${STREAM_NAME:-birdcam}"
+AWB_MODE="${AWB_MODE:-auto}"
+DENOISE_MODE="${DENOISE_MODE:-off}"
+EXPOSURE_MODE="${EXPOSURE_MODE:-normal}"
+EV_VALUE="${EV_VALUE:-0}"
+SHUTTER_SPEED="${SHUTTER_SPEED:-0}"
+
+GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
+
 HOSTNAME_SHORT=$(hostname -s)
 DEVICE_ID="birdcam_${HOSTNAME_SHORT}"
 STATE_TOPIC="birdcam/${HOSTNAME_SHORT}/state"
 CMD_TOPIC="birdcam/${HOSTNAME_SHORT}/cmd"
 AVAIL_TOPIC="birdcam/${HOSTNAME_SHORT}/availability"
+CAM_SETTINGS_TOPIC="birdcam/${HOSTNAME_SHORT}/camera"
 
 # Build mosquitto_pub auth args
 MQTT_AUTH=()
@@ -967,13 +1009,46 @@ publish_discovery() {
     mqtt_pub "${MQTT_TOPIC_PREFIX}/sensor/${DEVICE_ID}/wifi_quality/config" \
         "{\"name\":\"Wi-Fi Quality\",\"unique_id\":\"${DEVICE_ID}_wifi_quality\",\"state_topic\":\"${STATE_TOPIC}\",\"value_template\":\"{{ value_json.wifi_quality }}\",\"unit_of_measurement\":\"%\",\"icon\":\"mdi:wifi\",\"device\":${DEVICE_JSON}}"
 
-    # Stream resolution sensor
+    # Stream resolution sensor (read-only, sourced from state topic)
     mqtt_pub "${MQTT_TOPIC_PREFIX}/sensor/${DEVICE_ID}/resolution/config" \
         "{\"name\":\"Stream Resolution\",\"unique_id\":\"${DEVICE_ID}_resolution\",\"state_topic\":\"${STATE_TOPIC}\",\"value_template\":\"{{ value_json.resolution }}\",\"icon\":\"mdi:image-size-select-large\",\"device\":${DEVICE_JSON}}"
 
-    # Stream FPS sensor
+    # Stream FPS sensor (read-only, sourced from state topic)
     mqtt_pub "${MQTT_TOPIC_PREFIX}/sensor/${DEVICE_ID}/fps/config" \
         "{\"name\":\"Stream FPS\",\"unique_id\":\"${DEVICE_ID}_fps\",\"state_topic\":\"${STATE_TOPIC}\",\"value_template\":\"{{ value_json.fps }}\",\"unit_of_measurement\":\"fps\",\"icon\":\"mdi:filmstrip\",\"device\":${DEVICE_JSON}}"
+
+    # ── Camera settings controls ─────────────────────────────────────────────
+
+    # Resolution text control (works for both Pi and USB cameras)
+    mqtt_pub "${MQTT_TOPIC_PREFIX}/text/${DEVICE_ID}/resolution_ctrl/config" \
+        "{\"name\":\"Set Resolution\",\"unique_id\":\"${DEVICE_ID}_res_ctrl\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/resolution/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/resolution/state\",\"icon\":\"mdi:image-size-select-large\",\"device\":${DEVICE_JSON}}"
+
+    # FPS number control (works for both Pi and USB cameras)
+    mqtt_pub "${MQTT_TOPIC_PREFIX}/number/${DEVICE_ID}/fps_ctrl/config" \
+        "{\"name\":\"Set FPS\",\"unique_id\":\"${DEVICE_ID}_fps_ctrl\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/fps/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/fps/state\",\"min\":1,\"max\":120,\"step\":1,\"unit_of_measurement\":\"fps\",\"icon\":\"mdi:filmstrip\",\"device\":${DEVICE_JSON}}"
+
+    # Pi-camera-only settings
+    if [[ "${CAM_TYPE}" == "pi" ]]; then
+        # White balance select
+        mqtt_pub "${MQTT_TOPIC_PREFIX}/select/${DEVICE_ID}/awb/config" \
+            "{\"name\":\"White Balance\",\"unique_id\":\"${DEVICE_ID}_awb\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/awb/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/awb/state\",\"options\":[\"off\",\"auto\",\"incandescent\",\"tungsten\",\"fluorescent\",\"indoor\",\"daylight\",\"cloudy\"],\"icon\":\"mdi:white-balance-auto\",\"device\":${DEVICE_JSON}}"
+
+        # Denoise select
+        mqtt_pub "${MQTT_TOPIC_PREFIX}/select/${DEVICE_ID}/denoise/config" \
+            "{\"name\":\"Denoise\",\"unique_id\":\"${DEVICE_ID}_denoise\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/denoise/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/denoise/state\",\"options\":[\"off\",\"cdn-off\",\"cdn-fast\",\"cdn-hq\"],\"icon\":\"mdi:image-filter\",\"device\":${DEVICE_JSON}}"
+
+        # Exposure mode select
+        mqtt_pub "${MQTT_TOPIC_PREFIX}/select/${DEVICE_ID}/exposure_mode/config" \
+            "{\"name\":\"Exposure Mode\",\"unique_id\":\"${DEVICE_ID}_exposure_mode\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/exposure/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/exposure/state\",\"options\":[\"normal\",\"sport\",\"long\",\"custom\"],\"icon\":\"mdi:camera-iris\",\"device\":${DEVICE_JSON}}"
+
+        # Exposure compensation (EV) number
+        mqtt_pub "${MQTT_TOPIC_PREFIX}/number/${DEVICE_ID}/ev/config" \
+            "{\"name\":\"Exposure Compensation (EV)\",\"unique_id\":\"${DEVICE_ID}_ev\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/ev/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/ev/state\",\"min\":-10,\"max\":10,\"step\":0.5,\"icon\":\"mdi:brightness-6\",\"device\":${DEVICE_JSON}}"
+
+        # Shutter speed number (0 = auto)
+        mqtt_pub "${MQTT_TOPIC_PREFIX}/number/${DEVICE_ID}/shutter/config" \
+            "{\"name\":\"Shutter Speed (µs, 0=auto)\",\"unique_id\":\"${DEVICE_ID}_shutter\",\"command_topic\":\"${CAM_SETTINGS_TOPIC}/shutter/set\",\"state_topic\":\"${CAM_SETTINGS_TOPIC}/shutter/state\",\"min\":0,\"max\":1000000,\"step\":1,\"unit_of_measurement\":\"µs\",\"icon\":\"mdi:timer\",\"device\":${DEVICE_JSON}}"
+    fi
 
     # Availability
     mqtt_pub "${AVAIL_TOPIC}" "online"
@@ -1025,25 +1100,197 @@ PEOF
     mqtt_pub "${STATE_TOPIC}" "${payload}"
 }
 
-# ─── Listen for commands (restart / update) ───────────────────────────────────
+# ─── Publish current camera settings to their state topics ───────────────────
+publish_camera_state() {
+    mqtt_pub "${CAM_SETTINGS_TOPIC}/fps/state" "${FPS:-15}"
+    mqtt_pub "${CAM_SETTINGS_TOPIC}/resolution/state" "${WIDTH:-1280}x${HEIGHT:-720}"
+    if [[ "${CAM_TYPE}" == "pi" ]]; then
+        mqtt_pub "${CAM_SETTINGS_TOPIC}/awb/state" "${AWB_MODE:-auto}"
+        mqtt_pub "${CAM_SETTINGS_TOPIC}/denoise/state" "${DENOISE_MODE:-off}"
+        mqtt_pub "${CAM_SETTINGS_TOPIC}/exposure/state" "${EXPOSURE_MODE:-normal}"
+        mqtt_pub "${CAM_SETTINGS_TOPIC}/ev/state" "${EV_VALUE:-0}"
+        mqtt_pub "${CAM_SETTINGS_TOPIC}/shutter/state" "${SHUTTER_SPEED:-0}"
+    fi
+}
+
+# ─── Persist a key=value change to birdcam.conf and reload in memory ─────────
+update_conf() {
+    local key="$1"
+    local value="$2"
+    if grep -q "^${key}=" "${CONF}"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "${CONF}"
+    else
+        echo "${key}=\"${value}\"" >> "${CONF}"
+    fi
+    # shellcheck disable=SC1090
+    source "${CONF}"
+}
+
+# ─── Rebuild go2rtc.yaml from current conf values ────────────────────────────
+rebuild_go2rtc_config() {
+    local cam_cmd
+    if [[ "${CAM_TYPE}" == "usb" ]]; then
+        if [[ "${USB_HAS_H264}" == "true" ]]; then
+            cam_cmd="exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -input_format h264 -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS} -i ${CAM_DEVICE} -c copy -f h264 -"
+        elif [[ "${USB_HAS_MJPEG}" == "true" ]]; then
+            cam_cmd="exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -input_format mjpeg -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
+        else
+            cam_cmd="exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
+        fi
+    else
+        cam_cmd="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
+        cam_cmd+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
+        cam_cmd+=" --awb ${AWB_MODE:-auto}"
+        [[ "${DENOISE_MODE:-off}" != "off" ]] && cam_cmd+=" --denoise ${DENOISE_MODE:-off}"
+        [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && cam_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
+        [[ "${EV_VALUE:-0}" != "0" ]] && cam_cmd+=" --ev ${EV_VALUE:-0}"
+        [[ "${SHUTTER_SPEED:-0}" != "0" ]] && cam_cmd+=" --shutter ${SHUTTER_SPEED:-0}"
+        cam_cmd+=" --libav-format h264 -o -"
+    fi
+
+    cat > "${GO2RTC_YAML}" <<REBUILD_EOF
+streams:
+  ${STREAM_NAME}:
+    - ${cam_cmd}
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+
+api:
+  listen: ":1984"
+
+log:
+  level: warn
+REBUILD_EOF
+}
+
+# ─── Validate and apply a single camera setting ───────────────────────────────
+apply_camera_setting() {
+    local setting="$1"
+    local value="$2"
+    local valid=true
+
+    case "${setting}" in
+        fps)
+            if [[ "${value}" =~ ^[0-9]+$ ]] && [[ "${value}" -ge 1 ]] && [[ "${value}" -le 120 ]]; then
+                update_conf "FPS" "${value}"
+            else
+                logger -t birdcam-mqtt "Invalid FPS value ignored: ${value}"
+                valid=false
+            fi
+            ;;
+        resolution)
+            local w h
+            w=$(echo "${value}" | cut -d'x' -f1)
+            h=$(echo "${value}" | cut -d'x' -f2)
+            if [[ "${w}" =~ ^[0-9]+$ ]] && [[ "${h}" =~ ^[0-9]+$ ]] \
+               && [[ "${w}" -gt 0 ]] && [[ "${h}" -gt 0 ]]; then
+                update_conf "WIDTH" "${w}"
+                update_conf "HEIGHT" "${h}"
+            else
+                logger -t birdcam-mqtt "Invalid resolution value ignored: ${value}"
+                valid=false
+            fi
+            ;;
+        awb)
+            case "${value}" in
+                off|auto|incandescent|tungsten|fluorescent|indoor|daylight|cloudy)
+                    update_conf "AWB_MODE" "${value}" ;;
+                *)
+                    logger -t birdcam-mqtt "Invalid AWB mode ignored: ${value}"
+                    valid=false ;;
+            esac
+            ;;
+        denoise)
+            case "${value}" in
+                off|cdn-off|cdn-fast|cdn-hq)
+                    update_conf "DENOISE_MODE" "${value}" ;;
+                *)
+                    logger -t birdcam-mqtt "Invalid denoise mode ignored: ${value}"
+                    valid=false ;;
+            esac
+            ;;
+        exposure)
+            case "${value}" in
+                normal|sport|long|custom)
+                    update_conf "EXPOSURE_MODE" "${value}" ;;
+                *)
+                    logger -t birdcam-mqtt "Invalid exposure mode ignored: ${value}"
+                    valid=false ;;
+            esac
+            ;;
+        ev)
+            if [[ "${value}" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                local ev_int
+                ev_int=$(echo "${value}" | awk '{print int($1)}')
+                if [[ "${ev_int}" -ge -10 ]] && [[ "${ev_int}" -le 10 ]]; then
+                    update_conf "EV_VALUE" "${value}"
+                else
+                    logger -t birdcam-mqtt "EV value out of range ignored: ${value}"
+                    valid=false
+                fi
+            else
+                logger -t birdcam-mqtt "Invalid EV value ignored: ${value}"
+                valid=false
+            fi
+            ;;
+        shutter)
+            if [[ "${value}" =~ ^[0-9]+$ ]]; then
+                update_conf "SHUTTER_SPEED" "${value}"
+            else
+                logger -t birdcam-mqtt "Invalid shutter speed ignored: ${value}"
+                valid=false
+            fi
+            ;;
+        *)
+            logger -t birdcam-mqtt "Unknown camera setting ignored: ${setting}"
+            valid=false
+            ;;
+    esac
+
+    if [[ "${valid}" == "true" ]]; then
+        rebuild_go2rtc_config
+        systemctl restart go2rtc.service 2>/dev/null || true
+        logger -t birdcam-mqtt "Camera setting applied: ${setting}=${value}"
+        publish_camera_state
+    fi
+}
+
+# ─── Listen for commands (restart / update) and camera settings ───────────────
 handle_commands() {
-    # Subscribe in background; process commands as they arrive
-    mosquitto_sub "${MQTT_AUTH[@]}" -t "${CMD_TOPIC}" 2>/dev/null | while read -r cmd; do
-        case "${cmd}" in
-            restart)
-                logger -t birdcam-mqtt "Restart requested via MQTT"
-                systemctl restart go2rtc.service 2>/dev/null || true
-                ;;
-            update)
-                logger -t birdcam-mqtt "Update requested via MQTT"
-                /usr/local/bin/birdcam-autoupdate.sh 2>/dev/null || true
-                ;;
-        esac
+    # Use -v so each output line is "<topic> <payload>", allowing both the
+    # existing CMD_TOPIC and the new per-setting camera topics to be handled
+    # from a single subscription.
+    mosquitto_sub "${MQTT_AUTH[@]}" -v \
+        -t "${CMD_TOPIC}" \
+        -t "${CAM_SETTINGS_TOPIC}/+/set" \
+        2>/dev/null | while IFS=' ' read -r topic payload; do
+        if [[ "${topic}" == "${CMD_TOPIC}" ]]; then
+            case "${payload}" in
+                restart)
+                    logger -t birdcam-mqtt "Restart requested via MQTT"
+                    systemctl restart go2rtc.service 2>/dev/null || true
+                    ;;
+                update)
+                    logger -t birdcam-mqtt "Update requested via MQTT"
+                    /usr/local/bin/birdcam-autoupdate.sh 2>/dev/null || true
+                    ;;
+            esac
+        else
+            # Extract setting name from topic: birdcam/<host>/camera/<setting>/set
+            local setting
+            setting=$(echo "${topic}" | sed "s|${CAM_SETTINGS_TOPIC}/||;s|/set\$||")
+            apply_camera_setting "${setting}" "${payload}"
+        fi
     done
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 publish_discovery
+publish_camera_state
 
 # Start command listener in background
 handle_commands &
@@ -1053,6 +1300,7 @@ trap "kill ${CMD_PID} 2>/dev/null; mqtt_pub '${AVAIL_TOPIC}' 'offline'" EXIT
 # Periodically publish state (every 30 seconds)
 while true; do
     publish_state
+    publish_camera_state
     sleep 30
 done
 MQTT_DISC_EOF
