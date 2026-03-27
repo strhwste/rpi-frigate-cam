@@ -10,12 +10,15 @@
 #   - Installs required packages (idempotent)
 #   - Enables camera interface via raspi-config
 #   - Downloads the latest go2rtc binary (auto-detects arm arch)
-#   - Creates go2rtc.yaml with a "birdcam" stream using rpicam-vid
+#   - Creates go2rtc.yaml with main + sub streams (multi-stream for Frigate)
+#   - WebRTC with STUN ICE candidates for improved connectivity
 #   - Creates a systemd service for go2rtc (auto-restart, user pi)
 #   - Interactive resolution & framerate selector with Pi-model estimates
+#   - Sub-stream for detection (low-res via go2rtc ffmpeg transcoding)
 #   - Adaptive framerate lowering when Wi-Fi signal drops
 #   - Home Assistant MQTT discovery (restart / update buttons, watchdog)
 #   - Auto-update cron job pulling latest setup.sh from GitHub
+#   - Frigate integration examples (standalone, restream, bundled go2rtc)
 #   - Safety checks, backups, coloured output, final instructions
 #
 # Repository : https://github.com/strhwste/rpi-frigate-cam
@@ -55,6 +58,9 @@ BACKUP_DIR="/etc/birdcam-backups"
 STREAM_NAME="birdcam"
 RTSP_PORT="8554"
 WEBRTC_PORT="8555"
+DEFAULT_SUB_WIDTH=640
+DEFAULT_SUB_HEIGHT=480
+DEFAULT_SUB_FPS=5
 
 # ─── Root / sudo check ──────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -130,7 +136,7 @@ backup_file() {
 # ==============================================================================
 header "Step 1: System Update & Package Installation"
 
-REQUIRED_PKGS=(git curl wget jq mosquitto-clients v4l-utils libraspberrypi-bin)
+REQUIRED_PKGS=(git curl wget jq ffmpeg mosquitto-clients v4l-utils libraspberrypi-bin)
 
 # Check which packages are already installed
 PKGS_TO_INSTALL=()
@@ -507,6 +513,65 @@ if [[ "${CAM_TYPE}" == "pi" ]]; then
     fi
 fi
 
+# ─── Sub-stream for detection (lower resolution) ────────────────────────────
+# Modern Frigate setups benefit from separate main + sub streams:
+#   main (birdcam)     — high-res for recording & live view
+#   sub  (birdcam_sub) — low-res for detection (less CPU on Frigate)
+# The sub-stream is derived from the main via go2rtc's ffmpeg transcoding,
+# so no second camera process is needed.
+echo ""
+echo -e "${BOLD}Sub-stream for Frigate detection (recommended):${NC}"
+echo "  Creates a low-resolution detection stream (${STREAM_NAME}_sub) alongside"
+echo "  the main stream. Frigate uses the sub-stream for object detection and the"
+echo "  main stream for recording/live view, reducing CPU usage significantly."
+echo "  The sub-stream is derived from the main stream inside go2rtc (no extra"
+echo "  camera process required)."
+read -r -p "  Enable sub-stream for detection? [Y/n]: " ENABLE_SUB_STREAM
+ENABLE_SUB_STREAM="${ENABLE_SUB_STREAM:-y}"
+
+SUB_WIDTH=""
+SUB_HEIGHT=""
+SUB_FPS=""
+
+if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
+    # Auto-calculate sub-stream resolution: DEFAULT_SUB_WIDTH wide, aspect-ratio-preserved
+    SUB_WIDTH=${DEFAULT_SUB_WIDTH}
+    SUB_HEIGHT=$(( WIDTH > 0 ? (DEFAULT_SUB_WIDTH * HEIGHT / WIDTH + 1) / 2 * 2 : DEFAULT_SUB_HEIGHT ))
+    # Ensure minimum height of 2 and reasonable bounds
+    [[ "${SUB_HEIGHT}" -lt 2 ]] && SUB_HEIGHT=${DEFAULT_SUB_HEIGHT}
+    [[ "${SUB_HEIGHT}" -gt ${DEFAULT_SUB_WIDTH} ]] && SUB_HEIGHT=${DEFAULT_SUB_HEIGHT}
+    SUB_FPS=${DEFAULT_SUB_FPS}
+
+    echo ""
+    echo -e "  Auto-calculated sub-stream: ${CYAN}${SUB_WIDTH}x${SUB_HEIGHT} @ ${SUB_FPS} fps${NC}"
+    read -r -p "  Accept sub-stream defaults? [Y/n]: " SUB_ACCEPT
+    SUB_ACCEPT="${SUB_ACCEPT:-y}"
+
+    if [[ "${SUB_ACCEPT,,}" != "y" ]]; then
+        read -r -p "  Sub-stream resolution (e.g. 640x480): " SUB_CUSTOM_RES
+        if [[ -n "${SUB_CUSTOM_RES}" ]]; then
+            SUB_WIDTH=$(echo "${SUB_CUSTOM_RES}" | cut -d'x' -f1)
+            SUB_HEIGHT=$(echo "${SUB_CUSTOM_RES}" | cut -d'x' -f2)
+            if ! [[ "${SUB_WIDTH}" =~ ^[0-9]+$ && "${SUB_HEIGHT}" =~ ^[0-9]+$ \
+                   && "${SUB_WIDTH}" -gt 0 && "${SUB_HEIGHT}" -gt 0 ]]; then
+                warn "Invalid sub-stream resolution; using ${DEFAULT_SUB_WIDTH}x${DEFAULT_SUB_HEIGHT}"
+                SUB_WIDTH=${DEFAULT_SUB_WIDTH}; SUB_HEIGHT=${DEFAULT_SUB_HEIGHT}
+            fi
+        fi
+        read -r -p "  Sub-stream FPS [5]: " SUB_FPS_INPUT
+        if [[ -n "${SUB_FPS_INPUT}" ]] && [[ "${SUB_FPS_INPUT}" =~ ^[0-9]+$ ]] \
+           && [[ "${SUB_FPS_INPUT}" -ge 1 ]]; then
+            SUB_FPS="${SUB_FPS_INPUT}"
+        else
+            SUB_FPS=${DEFAULT_SUB_FPS}
+        fi
+    fi
+
+    ok "Sub-stream: ${SUB_WIDTH}x${SUB_HEIGHT} @ ${SUB_FPS} fps (${STREAM_NAME}_sub)"
+else
+    info "Sub-stream disabled. Frigate will use the main stream for all roles."
+fi
+
 # ─── MQTT / Home Assistant configuration (optional) ─────────────────────────
 echo ""
 read -r -p "Enable Home Assistant MQTT discovery? [y/N]: " ENABLE_MQTT
@@ -573,6 +638,11 @@ DENOISE_MODE="${DENOISE_MODE}"
 EXPOSURE_MODE="${EXPOSURE_MODE}"
 EV_VALUE="${EV_VALUE}"
 SHUTTER_SPEED="${SHUTTER_SPEED}"
+SUB_ENABLED="${ENABLE_SUB_STREAM,,}"
+SUB_WIDTH="${SUB_WIDTH}"
+SUB_HEIGHT="${SUB_HEIGHT}"
+SUB_FPS="${SUB_FPS}"
+WEBRTC_PORT="${WEBRTC_PORT}"
 BIRDCAM_EOF
 
 chmod 600 "${BIRDCAM_CONF}"
@@ -672,6 +742,13 @@ else
     CAM_CMD+=" -o -"
 fi
 
+# Build sub-stream source (go2rtc ffmpeg transcoding from main stream)
+SUB_STREAM_BLOCK=""
+if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]] && [[ -n "${SUB_WIDTH}" ]] && [[ -n "${SUB_HEIGHT}" ]]; then
+    SUB_STREAM_BLOCK="  ${STREAM_NAME}_sub:
+    - \"ffmpeg:${STREAM_NAME}#video=h264#width=${SUB_WIDTH}#height=${SUB_HEIGHT}#raw=-r ${SUB_FPS}\""
+fi
+
 cat > "${GO2RTC_YAML}" <<GO2RTC_EOF
 # go2rtc configuration for birdcam
 # Generated by setup.sh — $(date)
@@ -680,12 +757,15 @@ cat > "${GO2RTC_YAML}" <<GO2RTC_EOF
 streams:
   ${STREAM_NAME}:
     - ${CAM_CMD}
+${SUB_STREAM_BLOCK}
 
 rtsp:
   listen: ":${RTSP_PORT}"
 
 webrtc:
   listen: ":${WEBRTC_PORT}"
+  candidates:
+    - stun:${WEBRTC_PORT}
 
 api:
   listen: ":1984"
@@ -696,7 +776,10 @@ GO2RTC_EOF
 
 chown "${RUN_USER}:${RUN_USER}" "${GO2RTC_YAML}" 2>/dev/null || true
 ok "go2rtc config written to ${GO2RTC_YAML}"
-info "Stream command: ${CAM_CMD}"
+info "Main stream: ${CAM_CMD}"
+if [[ -n "${SUB_STREAM_BLOCK}" ]]; then
+    info "Sub-stream: ${STREAM_NAME}_sub (${SUB_WIDTH}x${SUB_HEIGHT} @ ${SUB_FPS} fps via ffmpeg transcoding)"
+fi
 
 # ==============================================================================
 # 6. CREATE SYSTEMD SERVICE
@@ -780,6 +863,12 @@ DENOISE_MODE="${DENOISE_MODE:-off}"
 EXPOSURE_MODE="${EXPOSURE_MODE:-normal}"
 EV_VALUE="${EV_VALUE:-0}"
 SHUTTER_SPEED="${SHUTTER_SPEED:-0}"
+SUB_ENABLED="${SUB_ENABLED:-n}"
+SUB_WIDTH="${SUB_WIDTH:-640}"
+SUB_HEIGHT="${SUB_HEIGHT:-480}"
+SUB_FPS="${SUB_FPS:-5}"
+RTSP_PORT="${RTSP_PORT:-8554}"
+WEBRTC_PORT="${WEBRTC_PORT:-8555}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
 
@@ -848,16 +937,26 @@ if [[ "${NEW_STATE}" != "${PREV_STATE}" ]]; then
     # Rewrite go2rtc.yaml with adjusted FPS
     CAM_CMD=$(build_cam_cmd "${ADJUSTED_FPS}")
 
+    # Build sub-stream block if enabled
+    local sub_block=""
+    if [[ "${SUB_ENABLED}" == "y" ]] && [[ -n "${SUB_WIDTH}" ]] && [[ -n "${SUB_HEIGHT}" ]]; then
+        sub_block="  ${STREAM_NAME}_sub:
+    - \"ffmpeg:${STREAM_NAME}#video=h264#width=${SUB_WIDTH}#height=${SUB_HEIGHT}#raw=-r ${SUB_FPS}\""
+    fi
+
     cat > "${GO2RTC_YAML}" <<YAML_EOF
 streams:
   ${STREAM_NAME}:
     - ${CAM_CMD}
+${sub_block}
 
 rtsp:
-  listen: ":8554"
+  listen: ":${RTSP_PORT}"
 
 webrtc:
-  listen: ":8555"
+  listen: ":${WEBRTC_PORT}"
+  candidates:
+    - stun:${WEBRTC_PORT}
 
 api:
   listen: ":1984"
@@ -941,6 +1040,12 @@ DENOISE_MODE="${DENOISE_MODE:-off}"
 EXPOSURE_MODE="${EXPOSURE_MODE:-normal}"
 EV_VALUE="${EV_VALUE:-0}"
 SHUTTER_SPEED="${SHUTTER_SPEED:-0}"
+SUB_ENABLED="${SUB_ENABLED:-n}"
+SUB_WIDTH="${SUB_WIDTH:-640}"
+SUB_HEIGHT="${SUB_HEIGHT:-480}"
+SUB_FPS="${SUB_FPS:-5}"
+RTSP_PORT="${RTSP_PORT:-8554}"
+WEBRTC_PORT="${WEBRTC_PORT:-8555}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
 
@@ -1148,16 +1253,26 @@ rebuild_go2rtc_config() {
         cam_cmd+=" --libav-format h264 -o -"
     fi
 
+    # Build sub-stream block if enabled
+    local sub_block=""
+    if [[ "${SUB_ENABLED}" == "y" ]] && [[ -n "${SUB_WIDTH}" ]] && [[ -n "${SUB_HEIGHT}" ]]; then
+        sub_block="  ${STREAM_NAME}_sub:
+    - \"ffmpeg:${STREAM_NAME}#video=h264#width=${SUB_WIDTH}#height=${SUB_HEIGHT}#raw=-r ${SUB_FPS}\""
+    fi
+
     cat > "${GO2RTC_YAML}" <<REBUILD_EOF
 streams:
   ${STREAM_NAME}:
     - ${cam_cmd}
+${sub_block}
 
 rtsp:
-  listen: ":8554"
+  listen: ":${RTSP_PORT}"
 
 webrtc:
-  listen: ":8555"
+  listen: ":${WEBRTC_PORT}"
+  candidates:
+    - stun:${WEBRTC_PORT}
 
 api:
   listen: ":1984"
@@ -1423,12 +1538,18 @@ echo -e "${GREEN}${BOLD}║                  🐦 Birdcam Setup Complete! 🐦  
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${BOLD}Stream Details:${NC}"
-echo -e "  Resolution : ${WIDTH}x${HEIGHT} @ ${FPS} fps"
-echo -e "  Camera tool: ${CAM_TOOL}"
-echo -e "  Pi model   : ${PI_MODEL}"
+echo -e "  Main stream  : ${WIDTH}x${HEIGHT} @ ${FPS} fps"
+if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
+    echo -e "  Sub stream   : ${SUB_WIDTH}x${SUB_HEIGHT} @ ${SUB_FPS} fps (detection)"
+fi
+echo -e "  Camera tool  : ${CAM_TOOL}"
+echo -e "  Pi model     : ${PI_MODEL}"
 echo ""
-echo -e "${BOLD}📺 RTSP URL:${NC}"
-echo -e "  ${CYAN}rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}${NC}"
+echo -e "${BOLD}📺 RTSP URLs:${NC}"
+echo -e "  Main : ${CYAN}rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}${NC}"
+if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
+    echo -e "  Sub  : ${CYAN}rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}_sub${NC}"
+fi
 echo ""
 echo -e "${BOLD}🌐 WebRTC (browser):${NC}"
 echo -e "  ${CYAN}http://${PI_IP}:1984/${NC}"
@@ -1436,43 +1557,159 @@ echo ""
 echo -e "${BOLD}▶ Test with VLC:${NC}"
 echo -e "  vlc rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
 echo ""
-echo -e "${BOLD}📋 Frigate Configuration — Option A (direct RTSP):${NC}"
-echo -e "  ${YELLOW}cameras:"
-echo -e "    birdcam:"
-echo -e "      ffmpeg:"
-echo -e "        inputs:"
-echo -e "          - path: rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
-echo -e "            roles:"
-echo -e "              - detect"
-echo -e "      detect:"
-echo -e "        width: ${WIDTH}"
-echo -e "        height: ${HEIGHT}"
-echo -e "        fps: 5"
-echo -e "      objects:"
-echo -e "        track:"
-echo -e "          - bird${NC}"
-echo ""
-echo -e "${BOLD}📋 Frigate Configuration — Option B (via go2rtc restream):${NC}"
-echo -e "  ${YELLOW}go2rtc:"
-echo -e "    streams:"
-echo -e "      birdcam:"
-echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
-echo -e ""
-echo -e "  cameras:"
-echo -e "    birdcam:"
-echo -e "      ffmpeg:"
-echo -e "        inputs:"
-echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}"
-echo -e "            input_args: preset-rtsp-restream"
-echo -e "            roles:"
-echo -e "              - detect"
-echo -e "      detect:"
-echo -e "        width: ${WIDTH}"
-echo -e "        height: ${HEIGHT}"
-echo -e "        fps: 5"
-echo -e "      objects:"
-echo -e "        track:"
-echo -e "          - bird${NC}"
+
+if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
+    echo -e "${BOLD}📋 Frigate Configuration — Option A (multi-stream via go2rtc restream):${NC}"
+    echo -e "  ${YELLOW}go2rtc:"
+    echo -e "    streams:"
+    echo -e "      birdcam:"
+    echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
+    echo -e "      birdcam_sub:"
+    echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}_sub"
+    echo -e ""
+    echo -e "  cameras:"
+    echo -e "    birdcam:"
+    echo -e "      ffmpeg:"
+    echo -e "        inputs:"
+    echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}"
+    echo -e "            input_args: preset-rtsp-restream"
+    echo -e "            roles:"
+    echo -e "              - record"
+    echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}_sub"
+    echo -e "            input_args: preset-rtsp-restream"
+    echo -e "            roles:"
+    echo -e "              - detect"
+    echo -e "      detect:"
+    echo -e "        width: ${SUB_WIDTH}"
+    echo -e "        height: ${SUB_HEIGHT}"
+    echo -e "        fps: ${SUB_FPS}"
+    echo -e "      record:"
+    echo -e "        enabled: true"
+    echo -e "      objects:"
+    echo -e "        track:"
+    echo -e "          - bird${NC}"
+    echo ""
+    echo -e "${BOLD}📋 Frigate Configuration — Option B (direct RTSP, multi-stream):${NC}"
+    echo -e "  ${YELLOW}cameras:"
+    echo -e "    birdcam:"
+    echo -e "      ffmpeg:"
+    echo -e "        inputs:"
+    echo -e "          - path: rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
+    echo -e "            roles:"
+    echo -e "              - record"
+    echo -e "          - path: rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}_sub"
+    echo -e "            roles:"
+    echo -e "              - detect"
+    echo -e "      detect:"
+    echo -e "        width: ${SUB_WIDTH}"
+    echo -e "        height: ${SUB_HEIGHT}"
+    echo -e "        fps: ${SUB_FPS}"
+    echo -e "      record:"
+    echo -e "        enabled: true"
+    echo -e "      objects:"
+    echo -e "        track:"
+    echo -e "          - bird${NC}"
+    echo ""
+    echo -e "${BOLD}📋 Frigate Configuration — Option C (Frigate's bundled go2rtc):${NC}"
+    echo -e "  ${YELLOW}# Add these streams to Frigate's go2rtc config section."
+    echo -e "  # No need to run standalone go2rtc on the Pi — Frigate handles it."
+    echo -e "  go2rtc:"
+    echo -e "    streams:"
+    echo -e "      birdcam:"
+    echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
+    echo -e "      birdcam_sub:"
+    echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}_sub"
+    echo -e "    webrtc:"
+    echo -e "      candidates:"
+    echo -e "        - stun:8555"
+    echo -e ""
+    echo -e "  cameras:"
+    echo -e "    birdcam:"
+    echo -e "      ffmpeg:"
+    echo -e "        inputs:"
+    echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}"
+    echo -e "            input_args: preset-rtsp-restream"
+    echo -e "            roles:"
+    echo -e "              - record"
+    echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}_sub"
+    echo -e "            input_args: preset-rtsp-restream"
+    echo -e "            roles:"
+    echo -e "              - detect"
+    echo -e "      detect:"
+    echo -e "        width: ${SUB_WIDTH}"
+    echo -e "        height: ${SUB_HEIGHT}"
+    echo -e "        fps: ${SUB_FPS}"
+    echo -e "      record:"
+    echo -e "        enabled: true"
+    echo -e "      objects:"
+    echo -e "        track:"
+    echo -e "          - bird${NC}"
+else
+    echo -e "${BOLD}📋 Frigate Configuration — Option A (direct RTSP):${NC}"
+    echo -e "  ${YELLOW}cameras:"
+    echo -e "    birdcam:"
+    echo -e "      ffmpeg:"
+    echo -e "        inputs:"
+    echo -e "          - path: rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
+    echo -e "            roles:"
+    echo -e "              - detect"
+    echo -e "      detect:"
+    echo -e "        width: ${WIDTH}"
+    echo -e "        height: ${HEIGHT}"
+    echo -e "        fps: 5"
+    echo -e "      objects:"
+    echo -e "        track:"
+    echo -e "          - bird${NC}"
+    echo ""
+    echo -e "${BOLD}📋 Frigate Configuration — Option B (via go2rtc restream):${NC}"
+    echo -e "  ${YELLOW}go2rtc:"
+    echo -e "    streams:"
+    echo -e "      birdcam:"
+    echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
+    echo -e ""
+    echo -e "  cameras:"
+    echo -e "    birdcam:"
+    echo -e "      ffmpeg:"
+    echo -e "        inputs:"
+    echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}"
+    echo -e "            input_args: preset-rtsp-restream"
+    echo -e "            roles:"
+    echo -e "              - detect"
+    echo -e "      detect:"
+    echo -e "        width: ${WIDTH}"
+    echo -e "        height: ${HEIGHT}"
+    echo -e "        fps: 5"
+    echo -e "      objects:"
+    echo -e "        track:"
+    echo -e "          - bird${NC}"
+    echo ""
+    echo -e "${BOLD}📋 Frigate Configuration — Option C (Frigate's bundled go2rtc):${NC}"
+    echo -e "  ${YELLOW}# Add this stream to Frigate's go2rtc config section."
+    echo -e "  # No need to run standalone go2rtc on the Pi — Frigate handles it."
+    echo -e "  go2rtc:"
+    echo -e "    streams:"
+    echo -e "      birdcam:"
+    echo -e "        - rtsp://${PI_IP}:${RTSP_PORT}/${STREAM_NAME}"
+    echo -e "    webrtc:"
+    echo -e "      candidates:"
+    echo -e "        - stun:8555"
+    echo -e ""
+    echo -e "  cameras:"
+    echo -e "    birdcam:"
+    echo -e "      ffmpeg:"
+    echo -e "        inputs:"
+    echo -e "          - path: rtsp://127.0.0.1:8554/${STREAM_NAME}"
+    echo -e "            input_args: preset-rtsp-restream"
+    echo -e "            roles:"
+    echo -e "              - detect"
+    echo -e "      detect:"
+    echo -e "        width: ${WIDTH}"
+    echo -e "        height: ${HEIGHT}"
+    echo -e "        fps: 5"
+    echo -e "      objects:"
+    echo -e "        track:"
+    echo -e "          - bird${NC}"
+fi
 echo ""
 echo -e "${BOLD}🔧 Service Management:${NC}"
 echo -e "  Check status : ${CYAN}sudo systemctl status go2rtc${NC}"
