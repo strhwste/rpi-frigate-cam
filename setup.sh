@@ -130,7 +130,7 @@ backup_file() {
 # ==============================================================================
 header "Step 1: System Update & Package Installation"
 
-REQUIRED_PKGS=(git curl wget jq mosquitto-clients libraspberrypi-bin)
+REQUIRED_PKGS=(git curl wget jq mosquitto-clients v4l-utils libraspberrypi-bin)
 
 # Check which packages are already installed
 PKGS_TO_INSTALL=()
@@ -207,109 +207,267 @@ if command -v raspi-config &>/dev/null; then
     ok "raspi-config camera enable attempted."
 fi
 
-# ─── Camera detection ───────────────────────────────────────────────────────
+# ─── Camera detection helpers ───────────────────────────────────────────────
+
+# Sort "WxH" resolution strings by total pixel count, highest first
+sort_resolutions_by_pixels() {
+    while IFS= read -r res; do
+        [[ -z "${res}" ]] && continue
+        local w h
+        w=$(echo "${res}" | cut -d'x' -f1)
+        h=$(echo "${res}" | cut -d'x' -f2)
+        printf '%010d %s\n' "$((w * h))" "${res}"
+    done | sort -rn | awk '{print $2}'
+}
+
+# Probe Pi camera (rpicam-hello / libcamera-hello); outputs detected resolutions
+probe_pi_camera() {
+    local probe_cmd=""
+    if command -v rpicam-hello &>/dev/null; then
+        probe_cmd="rpicam-hello"
+    elif command -v libcamera-hello &>/dev/null; then
+        probe_cmd="libcamera-hello"
+    else
+        return 1
+    fi
+    local cam_list
+    cam_list=$("${probe_cmd}" --list-cameras 2>&1 || true)
+    if echo "${cam_list}" | grep -qiE "no cameras|Unable to start"; then
+        return 1
+    fi
+    if ! echo "${cam_list}" | grep -qiE "[0-9]{3,}x[0-9]{3,}|imx|ov5647"; then
+        return 1
+    fi
+    echo "${cam_list}" | grep -oP '[0-9]{3,}x[0-9]{3,}' | sort_resolutions_by_pixels | uniq
+}
+
+# List USB video capture devices
+probe_usb_cameras() {
+    for dev in /dev/video*; do
+        [[ -e "${dev}" ]] || continue
+        if command -v v4l2-ctl &>/dev/null; then
+            if v4l2-ctl -d "${dev}" --info 2>/dev/null | grep -q "Video Capture"; then
+                echo "${dev}"
+            fi
+        else
+            echo "${dev}"
+        fi
+    done
+}
+
+# Get resolutions supported by a USB camera device
+get_usb_resolutions() {
+    local device="$1"
+    if command -v v4l2-ctl &>/dev/null; then
+        v4l2-ctl -d "${device}" --list-formats-ext 2>/dev/null \
+            | grep -oP '[0-9]{3,}x[0-9]{3,}' | sort_resolutions_by_pixels | uniq || true
+    fi
+}
+
+# ─── Detect camera and populate global vars ──────────────────────────────────
+# CAM_TYPE    : "pi" | "usb"
+# CAM_TOOL    : rpicam-vid | libcamera-vid  (Pi only)
+# CAM_DEVICE  : /dev/videoN                 (USB only)
+# DETECTED_RESOLUTIONS : array of WxH strings, highest first
+CAM_TYPE="pi"
 CAM_TOOL=""
+CAM_DEVICE=""
+DETECTED_RESOLUTIONS=()
+
+# Always resolve the Pi camera tool binary
 if command -v rpicam-vid &>/dev/null; then
     CAM_TOOL="rpicam-vid"
 elif command -v libcamera-vid &>/dev/null; then
     CAM_TOOL="libcamera-vid"
 else
-    warn "Neither rpicam-vid nor libcamera-vid found."
-    warn "Camera tools should be available after reboot on Bookworm."
-    CAM_TOOL="rpicam-vid"  # assume modern OS after reboot
+    CAM_TOOL="rpicam-vid"  # assume available after reboot
 fi
-ok "Camera tool selected: ${CAM_TOOL}"
 
-# Quick camera probe (non-fatal — the camera may work after reboot)
-if command -v rpicam-hello &>/dev/null; then
-    if rpicam-hello --list-cameras 2>&1 | grep -qi "no cameras"; then
-        warn "No camera detected. Ensure the ribbon cable is connected and reboot."
-    else
-        ok "Camera detected via rpicam-hello."
+# Attempt Pi camera probe
+pi_res=$(probe_pi_camera 2>/dev/null || true)
+
+# Attempt USB camera probe
+usb_dev_list=$(probe_usb_cameras 2>/dev/null || true)
+
+if [[ -n "${pi_res}" ]]; then
+    CAM_TYPE="pi"
+    while IFS= read -r r; do
+        [[ -n "${r}" ]] && DETECTED_RESOLUTIONS+=("${r}")
+    done <<< "${pi_res}"
+    ok "Pi camera detected. ${#DETECTED_RESOLUTIONS[@]} resolution mode(s) found."
+    if [[ -n "${usb_dev_list}" ]]; then
+        info "USB camera(s) also present. Using Pi camera (run setup again to switch)."
     fi
-elif command -v libcamera-hello &>/dev/null; then
-    if libcamera-hello --list-cameras 2>&1 | grep -qi "no cameras"; then
-        warn "No camera detected. Ensure the ribbon cable is connected and reboot."
-    else
-        ok "Camera detected via libcamera-hello."
+elif [[ -n "${usb_dev_list}" ]]; then
+    CAM_TYPE="usb"
+    CAM_DEVICE=$(echo "${usb_dev_list}" | head -1)
+
+    # Let user pick if multiple USB cameras are present
+    usb_count=$(echo "${usb_dev_list}" | wc -l)
+    if [[ "${usb_count}" -gt 1 ]]; then
+        echo -e "${BOLD}Multiple USB cameras detected:${NC}"
+        i=1
+        while IFS= read -r dev; do
+            cam_label=""
+            if command -v v4l2-ctl &>/dev/null; then
+                cam_label=$(v4l2-ctl -d "${dev}" --info 2>/dev/null \
+                    | grep "Card type" | sed 's/.*: //' || true)
+            fi
+            printf '  %d) %s  %s\n' "${i}" "${dev}" "${cam_label}"
+            ((i++))
+        done <<< "${usb_dev_list}"
+        read -r -p "Select camera [1-${usb_count}] (default: 1): " USB_CHOICE
+        USB_CHOICE="${USB_CHOICE:-1}"
+        CAM_DEVICE=$(echo "${usb_dev_list}" | sed -n "${USB_CHOICE}p")
+        [[ -z "${CAM_DEVICE}" ]] && CAM_DEVICE=$(echo "${usb_dev_list}" | head -1)
+    fi
+
+    ok "USB camera selected: ${CAM_DEVICE}"
+
+    # Detect USB camera resolutions
+    usb_res=$(get_usb_resolutions "${CAM_DEVICE}" || true)
+    while IFS= read -r r; do
+        [[ -n "${r}" ]] && DETECTED_RESOLUTIONS+=("${r}")
+    done <<< "${usb_res}"
+
+    # Install ffmpeg for USB camera encoding if not present
+    if ! command -v ffmpeg &>/dev/null; then
+        info "Installing ffmpeg for USB camera support..."
+        apt-get install -y -qq ffmpeg \
+            || warn "ffmpeg install failed — USB camera streaming may not work."
     fi
 else
-    info "Camera detection tools not available yet — will work after reboot."
+    # Nothing detected yet — default to Pi camera (camera may work after reboot)
+    CAM_TYPE="pi"
+    warn "No camera detected yet. Defaulting to Pi camera mode."
+    warn "Ensure the ribbon cable is connected; camera will be available after reboot."
 fi
+
+info "Camera type  : ${CAM_TYPE}"
+[[ "${CAM_TYPE}" == "pi"  ]] && info "Camera tool  : ${CAM_TOOL}"
+[[ "${CAM_TYPE}" == "usb" ]] && info "Camera device: ${CAM_DEVICE}"
 
 # ==============================================================================
 # 3. RESOLUTION & FRAMERATE SELECTOR
 # ==============================================================================
 header "Step 3: Resolution & Framerate Configuration"
 
-# Performance estimates per Pi model
-# Format: "WIDTHxHEIGHT  | description"
-echo -e "${BOLD}Available resolutions:${NC}"
-echo ""
-echo "  #   Resolution    Pi 3 estimate        Pi 4 estimate        Pi 5 estimate"
-echo "  ─── ───────────── ──────────────────── ──────────────────── ────────────────────"
-echo "  1)  640x480       ✅ Excellent          ✅ Excellent          ✅ Excellent"
-echo "  2)  1280x720      ✅ Good (≤15fps rec)  ✅ Excellent          ✅ Excellent"
-echo "  3)  1920x1080     ⚠️  Marginal (≤10fps) ✅ Good               ✅ Excellent"
-echo ""
+# ─── Resolution selection ────────────────────────────────────────────────────
+WIDTH=""
+HEIGHT=""
 
-# Default based on Pi model
-case "${PI_MODEL}" in
-    3)        DEFAULT_RES=1 ;;
-    4)        DEFAULT_RES=2 ;;
-    5)        DEFAULT_RES=3 ;;
-    *)        DEFAULT_RES=1 ;;
-esac
+if [[ ${#DETECTED_RESOLUTIONS[@]} -gt 0 ]]; then
+    echo -e "${BOLD}Detected camera resolutions (highest first):${NC}"
+    echo ""
+    i=1
+    for res in "${DETECTED_RESOLUTIONS[@]}"; do
+        printf '  %d) %s\n' "${i}" "${res}"
+        ((i++))
+    done
+    echo "  c) Enter custom resolution"
+    echo ""
+    HIGHEST_RES="${DETECTED_RESOLUTIONS[0]}"
+    read -r -p "Select resolution [1-${#DETECTED_RESOLUTIONS[@]}/c] (default: 1 = ${HIGHEST_RES}): " RES_CHOICE
+    RES_CHOICE="${RES_CHOICE:-1}"
 
-read -r -p "Select resolution [1-3] (default: ${DEFAULT_RES}): " RES_CHOICE
-RES_CHOICE="${RES_CHOICE:-${DEFAULT_RES}}"
-
-case "${RES_CHOICE}" in
-    1) WIDTH=640;  HEIGHT=480  ;;
-    2) WIDTH=1280; HEIGHT=720  ;;
-    3) WIDTH=1920; HEIGHT=1080 ;;
-    *) warn "Invalid choice, defaulting to 640x480."
-       WIDTH=640; HEIGHT=480 ;;
-esac
+    if [[ "${RES_CHOICE}" == "c" || "${RES_CHOICE}" == "C" ]]; then
+        read -r -p "  Enter resolution (e.g. 1280x720): " CUSTOM_RES
+        WIDTH=$(echo "${CUSTOM_RES}" | cut -d'x' -f1)
+        HEIGHT=$(echo "${CUSTOM_RES}" | cut -d'x' -f2)
+        if ! [[ "${WIDTH}" =~ ^[0-9]+$ && "${HEIGHT}" =~ ^[0-9]+$ && "${WIDTH}" -gt 0 && "${HEIGHT}" -gt 0 ]]; then
+            warn "Invalid resolution; using detected highest: ${HIGHEST_RES}"
+            WIDTH=$(echo "${HIGHEST_RES}" | cut -d'x' -f1)
+            HEIGHT=$(echo "${HIGHEST_RES}" | cut -d'x' -f2)
+        fi
+    else
+        chosen_res="${DETECTED_RESOLUTIONS[$((RES_CHOICE - 1))]:-${HIGHEST_RES}}"
+        WIDTH=$(echo "${chosen_res}" | cut -d'x' -f1)
+        HEIGHT=$(echo "${chosen_res}" | cut -d'x' -f2)
+    fi
+else
+    # No auto-detection available — offer a preset list plus custom entry
+    echo -e "${BOLD}Select a resolution (no camera resolutions auto-detected):${NC}"
+    echo ""
+    echo "  1)  640x480"
+    echo "  2)  1280x720"
+    echo "  3)  1920x1080"
+    echo "  4)  2560x1440"
+    echo "  5)  3840x2160"
+    echo "  c)  Custom"
+    echo ""
+    case "${PI_MODEL}" in
+        3)  DEFAULT_RES=1 ;;
+        4)  DEFAULT_RES=2 ;;
+        5)  DEFAULT_RES=3 ;;
+        *)  DEFAULT_RES=2 ;;
+    esac
+    read -r -p "Select resolution [1-5/c] (default: ${DEFAULT_RES}): " RES_CHOICE
+    RES_CHOICE="${RES_CHOICE:-${DEFAULT_RES}}"
+    case "${RES_CHOICE}" in
+        1) WIDTH=640;  HEIGHT=480  ;;
+        2) WIDTH=1280; HEIGHT=720  ;;
+        3) WIDTH=1920; HEIGHT=1080 ;;
+        4) WIDTH=2560; HEIGHT=1440 ;;
+        5) WIDTH=3840; HEIGHT=2160 ;;
+        c|C)
+            read -r -p "  Enter resolution (e.g. 1280x720): " CUSTOM_RES
+            WIDTH=$(echo "${CUSTOM_RES}" | cut -d'x' -f1)
+            HEIGHT=$(echo "${CUSTOM_RES}" | cut -d'x' -f2)
+            if ! [[ "${WIDTH}" =~ ^[0-9]+$ && "${HEIGHT}" =~ ^[0-9]+$ && "${WIDTH}" -gt 0 && "${HEIGHT}" -gt 0 ]]; then
+                warn "Invalid resolution; defaulting to 1280x720"
+                WIDTH=1280; HEIGHT=720
+            fi
+            ;;
+        *) warn "Invalid choice; defaulting to 1280x720."
+           WIDTH=1280; HEIGHT=720 ;;
+    esac
+fi
 
 ok "Resolution: ${WIDTH}x${HEIGHT}"
 
-# Framerate selection
+# ─── Framerate selection ─────────────────────────────────────────────────────
 echo ""
-echo -e "${BOLD}Available framerates:${NC}"
+echo -e "${BOLD}Select framerate:${NC}"
 echo ""
-echo "  #   FPS   Pi 3 note                    Pi 4 note"
-echo "  ─── ───── ──────────────────────────── ────────────────────────"
-echo "  1)  10    ✅ Recommended for Pi 3       ✅ Fine"
-echo "  2)  15    ✅ Good for 640p on Pi 3      ✅ Fine"
-echo "  3)  20    ⚠️  720p may stutter on Pi 3   ✅ Fine"
-echo "  4)  30    ⚠️  Only 640p on Pi 3          ✅ Fine"
+echo "  1)  5 fps   (lowest CPU — suitable for detection-only)"
+echo "  2)  10 fps"
+echo "  3)  15 fps"
+echo "  4)  20 fps"
+echo "  5)  25 fps"
+echo "  6)  30 fps"
+echo "  c)  Custom"
 echo ""
 
-# Default framerate based on model and resolution
+# Default framerate based on Pi model and selected resolution
 if [[ "${PI_MODEL}" == "3" ]]; then
-    if [[ ${WIDTH} -ge 1920 ]]; then
-        DEFAULT_FPS=1   # 10 fps
-    elif [[ ${WIDTH} -ge 1280 ]]; then
-        DEFAULT_FPS=2   # 15 fps
-    else
-        DEFAULT_FPS=2   # 15 fps
+    if   [[ ${WIDTH} -ge 1920 ]]; then DEFAULT_FPS=2   # 10 fps
+    elif [[ ${WIDTH} -ge 1280 ]]; then DEFAULT_FPS=3   # 15 fps
+    else                               DEFAULT_FPS=4   # 20 fps
     fi
 elif [[ "${PI_MODEL}" == "4" ]]; then
-    DEFAULT_FPS=3  # 20 fps
+    DEFAULT_FPS=4  # 20 fps
 else
-    DEFAULT_FPS=4  # 30 fps
+    DEFAULT_FPS=6  # 30 fps
 fi
 
-read -r -p "Select framerate [1-4] (default: ${DEFAULT_FPS}): " FPS_CHOICE
+read -r -p "Select framerate [1-6/c] (default: ${DEFAULT_FPS}): " FPS_CHOICE
 FPS_CHOICE="${FPS_CHOICE:-${DEFAULT_FPS}}"
 
 case "${FPS_CHOICE}" in
-    1) FPS=10 ;;
-    2) FPS=15 ;;
-    3) FPS=20 ;;
-    4) FPS=30 ;;
-    *) warn "Invalid choice, defaulting to 15 fps."
+    1) FPS=5  ;;
+    2) FPS=10 ;;
+    3) FPS=15 ;;
+    4) FPS=20 ;;
+    5) FPS=25 ;;
+    6) FPS=30 ;;
+    c|C)
+        read -r -p "  Enter framerate (e.g. 60): " FPS
+        if ! [[ "${FPS}" =~ ^[0-9]+$ && "${FPS}" -ge 1 ]]; then
+            warn "Invalid framerate; defaulting to 15"
+            FPS=15
+        fi
+        ;;
+    *) warn "Invalid choice; defaulting to 15 fps."
        FPS=15 ;;
 esac
 
@@ -342,6 +500,19 @@ if [[ "${ENABLE_MQTT,,}" == "y" ]]; then
 fi
 
 # ─── Save configuration for helper scripts ──────────────────────────────────
+# Detect USB camera format capabilities (used for go2rtc command and watchdog)
+USB_HAS_H264="false"
+USB_HAS_MJPEG="false"
+if [[ "${CAM_TYPE}" == "usb" ]] && command -v v4l2-ctl &>/dev/null; then
+    v4l2_formats=$(v4l2-ctl -d "${CAM_DEVICE}" --list-formats 2>/dev/null || true)
+    if echo "${v4l2_formats}" | grep -qiE "H264|H\.264|h264"; then
+        USB_HAS_H264="true"
+    fi
+    if echo "${v4l2_formats}" | grep -qiE "MJPEG|MJPG"; then
+        USB_HAS_MJPEG="true"
+    fi
+fi
+
 cat > "${BIRDCAM_CONF}" <<BIRDCAM_EOF
 # Birdcam configuration — generated by setup.sh
 # $(date)
@@ -349,7 +520,11 @@ STREAM_NAME="${STREAM_NAME}"
 WIDTH=${WIDTH}
 HEIGHT=${HEIGHT}
 FPS=${FPS}
+CAM_TYPE="${CAM_TYPE}"
 CAM_TOOL="${CAM_TOOL}"
+CAM_DEVICE="${CAM_DEVICE}"
+USB_HAS_H264="${USB_HAS_H264}"
+USB_HAS_MJPEG="${USB_HAS_MJPEG}"
 RTSP_PORT="${RTSP_PORT}"
 PI_MODEL="${PI_MODEL}"
 RUN_USER="${RUN_USER}"
@@ -414,23 +589,44 @@ header "Step 5: Create go2rtc Configuration"
 mkdir -p "${GO2RTC_DIR}"
 backup_file "${GO2RTC_YAML}"
 
-# Build the camera command
-# rpicam-vid flags:
+# Build the camera command based on camera type
+# ── Pi Camera (rpicam-vid / libcamera-vid) ───────────────────────────────────
 #   --codec h264    — hardware H.264 encoder
-#   --inline        — produce Annex-B H.264 (SPS/PPS before every IDR)
-#   --nopreview     — headless (no display window)
-#   --timeout 0     — run indefinitely (0 = infinite)
-#   --width / --height / --framerate
-#   --listen        — wait for a TCP connection (go2rtc connects to it)
-#   -o tcp://...    — output to TCP listener on localhost for go2rtc
+#   --inline        — Annex-B H.264 (SPS/PPS before every IDR)
+#   --nopreview     — headless
+#   --timeout 0     — run indefinitely
+#   --width/--height/--framerate
+#   --libav-format h264 / -o - — pipe raw H.264 to stdout for go2rtc
 #
-# For libcamera-vid the flags are identical.
-# Using exec source in go2rtc: the tool writes raw h264 to stdout.
+# ── USB Camera (ffmpeg + v4l2) ───────────────────────────────────────────────
+#   Prefer native H.264 (copy), then MJPEG→H.264, then raw→H.264 (SW encode)
 
-CAM_CMD="${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
-CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
-CAM_CMD+=" --libav-format h264"
-CAM_CMD+=" -o -"
+if [[ "${CAM_TYPE}" == "usb" ]]; then
+    if [[ "${USB_HAS_H264}" == "true" ]]; then
+        CAM_CMD="exec:ffmpeg -hide_banner -loglevel warning"
+        CAM_CMD+=" -f v4l2 -input_format h264"
+        CAM_CMD+=" -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS}"
+        CAM_CMD+=" -i ${CAM_DEVICE} -c copy -f h264 -"
+    elif [[ "${USB_HAS_MJPEG}" == "true" ]]; then
+        CAM_CMD="exec:ffmpeg -hide_banner -loglevel warning"
+        CAM_CMD+=" -f v4l2 -input_format mjpeg"
+        CAM_CMD+=" -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS}"
+        CAM_CMD+=" -i ${CAM_DEVICE}"
+        CAM_CMD+=" -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
+    else
+        CAM_CMD="exec:ffmpeg -hide_banner -loglevel warning"
+        CAM_CMD+=" -f v4l2"
+        CAM_CMD+=" -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS}"
+        CAM_CMD+=" -i ${CAM_DEVICE}"
+        CAM_CMD+=" -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
+    fi
+else
+    # Pi Camera — CAM_CMD includes the exec: prefix for consistency
+    CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
+    CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
+    CAM_CMD+=" --libav-format h264"
+    CAM_CMD+=" -o -"
+fi
 
 cat > "${GO2RTC_YAML}" <<GO2RTC_EOF
 # go2rtc configuration for birdcam
@@ -439,7 +635,7 @@ cat > "${GO2RTC_YAML}" <<GO2RTC_EOF
 
 streams:
   ${STREAM_NAME}:
-    - exec:${CAM_CMD}
+    - ${CAM_CMD}
 
 rtsp:
   listen: ":${RTSP_PORT}"
@@ -527,9 +723,13 @@ CONF="/etc/birdcam.conf"
 
 # Defaults if not set
 FPS="${FPS:-15}"
-WIDTH="${WIDTH:-640}"
-HEIGHT="${HEIGHT:-480}"
+WIDTH="${WIDTH:-1280}"
+HEIGHT="${HEIGHT:-720}"
+CAM_TYPE="${CAM_TYPE:-pi}"
 CAM_TOOL="${CAM_TOOL:-rpicam-vid}"
+CAM_DEVICE="${CAM_DEVICE:-}"
+USB_HAS_H264="${USB_HAS_H264:-false}"
+USB_HAS_MJPEG="${USB_HAS_MJPEG:-false}"
 STREAM_NAME="${STREAM_NAME:-birdcam}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
@@ -551,6 +751,21 @@ get_wifi_quality() {
         fi
     fi
     echo "${quality}"
+}
+
+build_cam_cmd() {
+    local fps="$1"
+    if [[ "${CAM_TYPE}" == "usb" ]]; then
+        if [[ "${USB_HAS_H264}" == "true" ]]; then
+            echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -input_format h264 -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c copy -f h264 -"
+        elif [[ "${USB_HAS_MJPEG}" == "true" ]]; then
+            echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -input_format mjpeg -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
+        else
+            echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
+        fi
+    else
+        echo "exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps} --libav-format h264 -o -"
+    fi
 }
 
 WIFI_QUALITY=$(get_wifi_quality)
@@ -575,15 +790,12 @@ if [[ "${NEW_STATE}" != "${PREV_STATE}" ]]; then
     esac
 
     # Rewrite go2rtc.yaml with adjusted FPS
-    CAM_CMD="${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
-    CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${ADJUSTED_FPS}"
-    CAM_CMD+=" --libav-format h264"
-    CAM_CMD+=" -o -"
+    CAM_CMD=$(build_cam_cmd "${ADJUSTED_FPS}")
 
     cat > "${GO2RTC_YAML}" <<YAML_EOF
 streams:
   ${STREAM_NAME}:
-    - exec:${CAM_CMD}
+    - ${CAM_CMD}
 
 rtsp:
   listen: ":8554"
