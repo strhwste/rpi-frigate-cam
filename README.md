@@ -1,13 +1,15 @@
 # 🐦 rpi-frigate-cam
 
-Turn a Raspberry Pi (3/4/5) with a standard Pi Camera into a dedicated, low-resource RTSP stream optimised for [Frigate](https://frigate.video/) birdwatching.
+Turn a Raspberry Pi (3/4/5) with **any camera** into a dedicated, low-resource RTSP stream optimised for [Frigate](https://frigate.video/) birdwatching.
 
 ## Features
 
 - **One-command setup** — `sudo bash setup.sh` does everything
-- **go2rtc** RTSP / WebRTC streaming with hardware H.264 encoding
+- **Universal camera support** — Pi Camera V1/V2/HQ/GS, USB webcams, and any V4L2 device
+- **Auto-detects camera resolutions** — queries the camera and defaults to the highest available
+- **go2rtc** RTSP / WebRTC streaming with hardware H.264 encoding (Pi cameras) or software encoding (USB)
 - **Auto-detects** Pi model & architecture (armv7l / arm64)
-- **Interactive** resolution & framerate selector with per-model performance estimates
+- **Interactive** resolution & framerate selector — populated from live camera probe; supports custom values
 - **Wi-Fi adaptive** — automatically lowers framerate when signal drops
 - **Home Assistant MQTT discovery** — CPU temp, RAM, stream status sensors + restart/update buttons
 - **Auto-update** — daily cron checks this repo for script updates
@@ -25,7 +27,7 @@ cd rpi-frigate-cam
 sudo bash setup.sh
 ```
 
-The script will guide you through resolution/framerate selection and optional MQTT setup.
+The script will auto-detect your camera and its supported resolutions, defaulting to the highest available. You can override the selection interactively.
 
 ## Requirements
 
@@ -33,8 +35,20 @@ The script will guide you through resolution/framerate selection and optional MQ
 |-----------|---------|
 | **Board** | Raspberry Pi 3, 4, 5, or Zero 2 W |
 | **OS** | Raspberry Pi OS Bookworm (32-bit or 64-bit) or later |
-| **Camera** | Pi Camera Module V1 or V2 (not HQ) |
+| **Camera** | Pi Camera V1, V2, HQ, GS — **or** any USB / V4L2 webcam |
 | **Network** | Wi-Fi or Ethernet connected to same network as Frigate |
+
+## Camera Support
+
+| Camera Type | Detection | Encoding | Notes |
+|-------------|-----------|----------|-------|
+| Pi Camera V1 (OV5647) | `rpicam-hello` | Hardware H.264 | Max 1080p30 |
+| Pi Camera V2 (IMX219) | `rpicam-hello` | Hardware H.264 | Max 1080p30 |
+| Pi Camera HQ (IMX477) | `rpicam-hello` | Hardware H.264 | Up to 4056×3040 |
+| Pi Camera GS (IMX296) | `rpicam-hello` | Hardware H.264 | 1456×1088 |
+| USB webcam (H.264) | `v4l2-ctl` | Copy (no re-encode) | Lowest CPU |
+| USB webcam (MJPEG) | `v4l2-ctl` | SW H.264 via ffmpeg | Moderate CPU |
+| USB webcam (raw) | `v4l2-ctl` | SW H.264 via ffmpeg | Higher CPU |
 
 ## What It Does
 
