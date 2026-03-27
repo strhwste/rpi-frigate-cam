@@ -244,6 +244,8 @@ The setup script automatically suggests lower fps defaults when you pick a highe
 
 Enable bird quality mode at the interactive prompt during setup (default: yes). The extra CPU cost is ~5–10 % on a Pi 4.
 
+On older Raspberry Pi camera-app builds, unsupported tuning flags are skipped automatically so the main `rpicam-vid` stream still starts cleanly instead of exiting with `exec/pipe: EOF`.
+
 ## MQTT Integration
 
 The MQTT integration is built directly on **`mosquitto_pub` / `mosquitto_sub`** (the standard Mosquitto CLI tools) and implements the [Home Assistant MQTT auto-discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) protocol.  No third-party dashboard like TouchKio is required — all entities appear automatically in the HA device registry once the broker is connected.
