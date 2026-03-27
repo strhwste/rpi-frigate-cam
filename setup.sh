@@ -1184,8 +1184,8 @@ apply_camera_setting() {
             ;;
         resolution)
             local w h
-            w=$(echo "${value}" | cut -dx -f1)
-            h=$(echo "${value}" | cut -dx -f2)
+            w=$(echo "${value}" | cut -d'x' -f1)
+            h=$(echo "${value}" | cut -d'x' -f2)
             if [[ "${w}" =~ ^[0-9]+$ ]] && [[ "${h}" =~ ^[0-9]+$ ]] \
                && [[ "${w}" -gt 0 ]] && [[ "${h}" -gt 0 ]]; then
                 update_conf "WIDTH" "${w}"
@@ -1225,7 +1225,7 @@ apply_camera_setting() {
         ev)
             if [[ "${value}" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
                 local ev_int
-                ev_int=$(echo "${value}" | awk '{print int($1 < 0 ? $1 : $1)}')
+                ev_int=$(echo "${value}" | awk '{print int($1)}')
                 if [[ "${ev_int}" -ge -10 ]] && [[ "${ev_int}" -le 10 ]]; then
                     update_conf "EV_VALUE" "${value}"
                 else
