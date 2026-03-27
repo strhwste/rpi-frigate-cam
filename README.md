@@ -8,6 +8,9 @@ Turn a Raspberry Pi (3/4/5) with **any camera** into a dedicated, low-resource R
 - **Universal camera support** — Pi Camera V1/V2/HQ/GS, USB webcams, and any V4L2 device
 - **Auto-detects camera resolutions** — queries the camera and defaults to the highest available
 - **go2rtc** RTSP / WebRTC streaming with hardware H.264 encoding (Pi cameras) or software encoding (USB)
+- **Multi-stream support** — automatic main + sub stream (high-res for recording/live, low-res for detection) using go2rtc's built-in ffmpeg transcoding
+- **WebRTC with STUN** — improved WebRTC connectivity with automatic ICE candidate configuration
+- **Frigate integration options** — standalone go2rtc on the Pi, Frigate restream, or Frigate's bundled go2rtc
 - **Auto-detects** Pi model & architecture (armv7l / arm64)
 - **Interactive** resolution & framerate selector — populated from live camera probe; supports custom values
 - **Resolution-aware framerate defaults** — higher resolution automatically suggests lower fps for better per-frame quality (ideal for bird photography)
@@ -55,14 +58,15 @@ The script will auto-detect your camera and its supported resolutions, defaultin
 
 ## What It Does
 
-1. Installs required packages (`git`, `curl`, `jq`, `mosquitto-clients`, etc.)
+1. Installs required packages (`git`, `curl`, `jq`, `ffmpeg`, `mosquitto-clients`, etc.)
 2. Enables the camera interface in boot config
 3. Downloads the latest [go2rtc](https://github.com/AlexxIT/go2rtc) binary
-4. Creates `/etc/go2rtc/go2rtc.yaml` with a `birdcam` stream
-5. Creates and enables a `go2rtc.service` systemd unit
-6. Sets up a Wi-Fi watchdog that adapts framerate to signal quality
-7. Optionally configures Home Assistant MQTT auto-discovery
-8. Installs a daily auto-update timer
+4. Creates `/etc/go2rtc/go2rtc.yaml` with a `birdcam` stream (and optional `birdcam_sub` detection stream)
+5. Configures WebRTC with STUN ICE candidates for improved connectivity
+6. Creates and enables a `go2rtc.service` systemd unit
+7. Sets up a Wi-Fi watchdog that adapts framerate to signal quality
+8. Optionally configures Home Assistant MQTT auto-discovery
+9. Installs a daily auto-update timer
 
 ## After Setup
 
@@ -79,7 +83,42 @@ vlc rtsp://<PI_IP>:8554/birdcam
 http://<PI_IP>:1984/
 ```
 
-### Add to Frigate (direct RTSP)
+### Add to Frigate (multi-stream, recommended)
+
+When the sub-stream is enabled (default), the setup creates both a high-resolution `birdcam` stream (for recording/live view) and a low-resolution `birdcam_sub` stream (for detection). This is the recommended Frigate configuration:
+
+```yaml
+go2rtc:
+  streams:
+    birdcam:
+      - rtsp://<PI_IP>:8554/birdcam
+    birdcam_sub:
+      - rtsp://<PI_IP>:8554/birdcam_sub
+
+cameras:
+  birdcam:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/birdcam
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/birdcam_sub
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+    detect:
+      width: 640   # match your sub-stream resolution
+      height: 480
+      fps: 5
+    record:
+      enabled: true
+    objects:
+      track:
+        - bird
+```
+
+### Add to Frigate (single stream, direct RTSP)
 
 ```yaml
 cameras:
@@ -118,6 +157,45 @@ cameras:
       width: 640
       height: 480
       fps: 5
+    objects:
+      track:
+        - bird
+```
+
+### Use Frigate's bundled go2rtc
+
+If you run go2rtc inside Frigate (common in modern setups), add the Pi camera streams to Frigate's `go2rtc` config section instead of running a separate instance. The Pi still runs its own go2rtc to capture the camera; Frigate's go2rtc restreams from the Pi:
+
+```yaml
+# In your Frigate config
+go2rtc:
+  streams:
+    birdcam:
+      - rtsp://<PI_IP>:8554/birdcam
+    birdcam_sub:
+      - rtsp://<PI_IP>:8554/birdcam_sub
+  webrtc:
+    candidates:
+      - stun:8555
+
+cameras:
+  birdcam:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/birdcam
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/birdcam_sub
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+    detect:
+      width: 640
+      height: 480
+      fps: 5
+    record:
+      enabled: true
     objects:
       track:
         - bird
