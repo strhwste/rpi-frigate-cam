@@ -705,7 +705,7 @@ backup_file "${GO2RTC_YAML}"
 #   --nopreview     — headless
 #   --timeout 0     — run indefinitely
 #   --width/--height/--framerate
-#   --libav-format h264 / -o - — pipe raw H.264 to stdout for go2rtc
+#   -o - — pipe raw H.264 to stdout for go2rtc
 #
 # ── USB Camera (ffmpeg + v4l2) ───────────────────────────────────────────────
 #   Prefer native H.264 (copy), then MJPEG→H.264, then raw→H.264 (SW encode)
@@ -738,7 +738,6 @@ else
     [[ "${EXPOSURE_MODE}" != "normal" ]] && CAM_CMD+=" --exposure ${EXPOSURE_MODE}"
     [[ "${EV_VALUE}" != "0" ]] && CAM_CMD+=" --ev ${EV_VALUE}"
     [[ "${SHUTTER_SPEED}" != "0" ]] && CAM_CMD+=" --shutter ${SHUTTER_SPEED}"
-    CAM_CMD+=" --libav-format h264"
     CAM_CMD+=" -o -"
 fi
 
@@ -908,7 +907,7 @@ build_cam_cmd() {
         [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
         [[ "${EV_VALUE:-0}" != "0" ]] && pi_cmd+=" --ev ${EV_VALUE:-0}"
         [[ "${SHUTTER_SPEED:-0}" != "0" ]] && pi_cmd+=" --shutter ${SHUTTER_SPEED:-0}"
-        pi_cmd+=" --libav-format h264 -o -"
+        pi_cmd+=" -o -"
         echo "${pi_cmd}"
     fi
 }
@@ -1250,7 +1249,7 @@ rebuild_go2rtc_config() {
         [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && cam_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
         [[ "${EV_VALUE:-0}" != "0" ]] && cam_cmd+=" --ev ${EV_VALUE:-0}"
         [[ "${SHUTTER_SPEED:-0}" != "0" ]] && cam_cmd+=" --shutter ${SHUTTER_SPEED:-0}"
-        cam_cmd+=" --libav-format h264 -o -"
+        cam_cmd+=" -o -"
     fi
 
     # Build sub-stream block if enabled
