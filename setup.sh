@@ -232,12 +232,13 @@ sort_resolutions_by_pixels() {
     done | sort -rn | awk '{print $2}'
 }
 
-# Probe Pi camera (rpicam-hello / libcamera-hello); outputs detected resolutions
+# Probe Pi camera (rpicam-hello); outputs detected resolutions
 probe_pi_camera() {
     local probe_cmd=""
     if command -v rpicam-hello &>/dev/null; then
         probe_cmd="rpicam-hello"
     elif command -v libcamera-hello &>/dev/null; then
+        warn "libcamera-hello is deprecated; consider installing rpicam-apps"
         probe_cmd="libcamera-hello"
     else
         return 1
@@ -279,7 +280,7 @@ get_usb_resolutions() {
 
 # ─── Detect camera and populate global vars ──────────────────────────────────
 # CAM_TYPE    : "pi" | "usb"
-# CAM_TOOL    : rpicam-vid | libcamera-vid  (Pi only)
+# CAM_TOOL    : rpicam-vid  (Pi only; libcamera-vid is deprecated)
 # CAM_DEVICE  : /dev/videoN                 (USB only)
 # DETECTED_RESOLUTIONS : array of WxH strings, highest first
 CAM_TYPE="pi"
@@ -291,6 +292,7 @@ DETECTED_RESOLUTIONS=()
 if command -v rpicam-vid &>/dev/null; then
     CAM_TOOL="rpicam-vid"
 elif command -v libcamera-vid &>/dev/null; then
+    warn "libcamera-vid is deprecated; consider installing rpicam-apps"
     CAM_TOOL="libcamera-vid"
 else
     CAM_TOOL="rpicam-vid"  # assume available after reboot
@@ -712,9 +714,10 @@ mkdir -p "${GO2RTC_DIR}"
 backup_file "${GO2RTC_YAML}"
 
 # Build the camera command based on camera type
-# ── Pi Camera (rpicam-vid / libcamera-vid) ───────────────────────────────────
+# ── Pi Camera (rpicam-vid) ───────────────────────────────────────────────────
 #   --codec h264    — hardware H.264 encoder
 #   --inline        — Annex-B H.264 (SPS/PPS before every IDR)
+#   --flush         — flush output after every frame (prevents pipe EOF)
 #   --nopreview     — headless
 #   --timeout 0     — run indefinitely
 #   --width/--height/--framerate
@@ -744,7 +747,7 @@ if [[ "${CAM_TYPE}" == "usb" ]]; then
     fi
 else
     # Pi Camera — CAM_CMD includes the exec: prefix for consistency
-    CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
+    CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0"
     CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
     CAM_CMD+=" --awb ${AWB_MODE}"
     [[ "${DENOISE_MODE}" != "off" ]] && CAM_CMD+=" --denoise ${DENOISE_MODE}"
@@ -914,7 +917,7 @@ build_cam_cmd() {
             echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
         fi
     else
-        local pi_cmd="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}"
+        local pi_cmd="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}"
         pi_cmd+=" --awb ${AWB_MODE:-auto}"
         [[ "${DENOISE_MODE:-off}" != "off" ]] && pi_cmd+=" --denoise ${DENOISE_MODE:-off}"
         [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
@@ -1255,7 +1258,7 @@ rebuild_go2rtc_config() {
             cam_cmd="exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
         fi
     else
-        cam_cmd="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
+        cam_cmd="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0"
         cam_cmd+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
         cam_cmd+=" --awb ${AWB_MODE:-auto}"
         [[ "${DENOISE_MODE:-off}" != "off" ]] && cam_cmd+=" --denoise ${DENOISE_MODE:-off}"
