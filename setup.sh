@@ -298,6 +298,31 @@ else
     CAM_TOOL="rpicam-vid"  # assume available after reboot
 fi
 
+load_cam_tool_help() {
+    if [[ -z "${CAM_TOOL_HELP:-}" ]] && command -v "${CAM_TOOL}" &>/dev/null; then
+        CAM_TOOL_HELP=$("${CAM_TOOL}" --help 2>&1 || true)
+    fi
+    printf '%s' "${CAM_TOOL_HELP:-}"
+}
+
+pi_camera_flag_supported() {
+    local flag="$1"
+    if ! command -v "${CAM_TOOL}" &>/dev/null; then
+        return 0
+    fi
+    grep -Fq -- "${flag}" <<< "$(load_cam_tool_help)"
+}
+
+build_pi_camera_tuning_flags() {
+    local flags=""
+    pi_camera_flag_supported "--awb" && flags+=" --awb ${AWB_MODE:-auto}"
+    [[ "${DENOISE_MODE:-off}" != "off" ]] && pi_camera_flag_supported "--denoise" && flags+=" --denoise ${DENOISE_MODE:-off}"
+    [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_camera_flag_supported "--exposure" && flags+=" --exposure ${EXPOSURE_MODE:-normal}"
+    [[ "${EV_VALUE:-0}" != "0" ]] && pi_camera_flag_supported "--ev" && flags+=" --ev ${EV_VALUE:-0}"
+    [[ "${SHUTTER_SPEED:-0}" != "0" ]] && pi_camera_flag_supported "--shutter" && flags+=" --shutter ${SHUTTER_SPEED:-0}"
+    printf '%s' "${flags}"
+}
+
 # Attempt Pi camera probe
 pi_res=$(probe_pi_camera 2>/dev/null || true)
 
@@ -749,11 +774,7 @@ else
     # Pi Camera — CAM_CMD includes the exec: prefix for consistency
     CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0"
     CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
-    CAM_CMD+=" --awb ${AWB_MODE}"
-    [[ "${DENOISE_MODE}" != "off" ]] && CAM_CMD+=" --denoise ${DENOISE_MODE}"
-    [[ "${EXPOSURE_MODE}" != "normal" ]] && CAM_CMD+=" --exposure ${EXPOSURE_MODE}"
-    [[ "${EV_VALUE}" != "0" ]] && CAM_CMD+=" --ev ${EV_VALUE}"
-    [[ "${SHUTTER_SPEED}" != "0" ]] && CAM_CMD+=" --shutter ${SHUTTER_SPEED}"
+    CAM_CMD+="$(build_pi_camera_tuning_flags)"
     CAM_CMD+=" -o -"
 fi
 
@@ -887,6 +908,31 @@ WEBRTC_PORT="${WEBRTC_PORT:-8555}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
 
+load_cam_tool_help() {
+    if [[ -z "${CAM_TOOL_HELP:-}" ]] && command -v "${CAM_TOOL}" &>/dev/null; then
+        CAM_TOOL_HELP=$("${CAM_TOOL}" --help 2>&1 || true)
+    fi
+    printf '%s' "${CAM_TOOL_HELP:-}"
+}
+
+pi_camera_flag_supported() {
+    local flag="$1"
+    if ! command -v "${CAM_TOOL}" &>/dev/null; then
+        return 0
+    fi
+    grep -Fq -- "${flag}" <<< "$(load_cam_tool_help)"
+}
+
+build_pi_camera_tuning_flags() {
+    local flags=""
+    pi_camera_flag_supported "--awb" && flags+=" --awb ${AWB_MODE:-auto}"
+    [[ "${DENOISE_MODE:-off}" != "off" ]] && pi_camera_flag_supported "--denoise" && flags+=" --denoise ${DENOISE_MODE:-off}"
+    [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_camera_flag_supported "--exposure" && flags+=" --exposure ${EXPOSURE_MODE:-normal}"
+    [[ "${EV_VALUE:-0}" != "0" ]] && pi_camera_flag_supported "--ev" && flags+=" --ev ${EV_VALUE:-0}"
+    [[ "${SHUTTER_SPEED:-0}" != "0" ]] && pi_camera_flag_supported "--shutter" && flags+=" --shutter ${SHUTTER_SPEED:-0}"
+    printf '%s' "${flags}"
+}
+
 # Get Wi-Fi signal quality (0-100)
 get_wifi_quality() {
     local quality=100
@@ -918,11 +964,7 @@ build_cam_cmd() {
         fi
     else
         local pi_cmd="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}"
-        pi_cmd+=" --awb ${AWB_MODE:-auto}"
-        [[ "${DENOISE_MODE:-off}" != "off" ]] && pi_cmd+=" --denoise ${DENOISE_MODE:-off}"
-        [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
-        [[ "${EV_VALUE:-0}" != "0" ]] && pi_cmd+=" --ev ${EV_VALUE:-0}"
-        [[ "${SHUTTER_SPEED:-0}" != "0" ]] && pi_cmd+=" --shutter ${SHUTTER_SPEED:-0}"
+        pi_cmd+="$(build_pi_camera_tuning_flags)"
         pi_cmd+=" -o -"
         echo "${pi_cmd}"
     fi
@@ -1063,6 +1105,31 @@ RTSP_PORT="${RTSP_PORT:-8554}"
 WEBRTC_PORT="${WEBRTC_PORT:-8555}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
+
+load_cam_tool_help() {
+    if [[ -z "${CAM_TOOL_HELP:-}" ]] && command -v "${CAM_TOOL}" &>/dev/null; then
+        CAM_TOOL_HELP=$("${CAM_TOOL}" --help 2>&1 || true)
+    fi
+    printf '%s' "${CAM_TOOL_HELP:-}"
+}
+
+pi_camera_flag_supported() {
+    local flag="$1"
+    if ! command -v "${CAM_TOOL}" &>/dev/null; then
+        return 0
+    fi
+    grep -Fq -- "${flag}" <<< "$(load_cam_tool_help)"
+}
+
+build_pi_camera_tuning_flags() {
+    local flags=""
+    pi_camera_flag_supported "--awb" && flags+=" --awb ${AWB_MODE:-auto}"
+    [[ "${DENOISE_MODE:-off}" != "off" ]] && pi_camera_flag_supported "--denoise" && flags+=" --denoise ${DENOISE_MODE:-off}"
+    [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && pi_camera_flag_supported "--exposure" && flags+=" --exposure ${EXPOSURE_MODE:-normal}"
+    [[ "${EV_VALUE:-0}" != "0" ]] && pi_camera_flag_supported "--ev" && flags+=" --ev ${EV_VALUE:-0}"
+    [[ "${SHUTTER_SPEED:-0}" != "0" ]] && pi_camera_flag_supported "--shutter" && flags+=" --shutter ${SHUTTER_SPEED:-0}"
+    printf '%s' "${flags}"
+}
 
 HOSTNAME_SHORT=$(hostname -s)
 DEVICE_ID="birdcam_${HOSTNAME_SHORT}"
@@ -1260,11 +1327,7 @@ rebuild_go2rtc_config() {
     else
         cam_cmd="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0"
         cam_cmd+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
-        cam_cmd+=" --awb ${AWB_MODE:-auto}"
-        [[ "${DENOISE_MODE:-off}" != "off" ]] && cam_cmd+=" --denoise ${DENOISE_MODE:-off}"
-        [[ "${EXPOSURE_MODE:-normal}" != "normal" ]] && cam_cmd+=" --exposure ${EXPOSURE_MODE:-normal}"
-        [[ "${EV_VALUE:-0}" != "0" ]] && cam_cmd+=" --ev ${EV_VALUE:-0}"
-        [[ "${SHUTTER_SPEED:-0}" != "0" ]] && cam_cmd+=" --shutter ${SHUTTER_SPEED:-0}"
+        cam_cmd+="$(build_pi_camera_tuning_flags)"
         cam_cmd+=" -o -"
     fi
 
