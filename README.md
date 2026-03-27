@@ -10,8 +10,10 @@ Turn a Raspberry Pi (3/4/5) with **any camera** into a dedicated, low-resource R
 - **go2rtc** RTSP / WebRTC streaming with hardware H.264 encoding (Pi cameras) or software encoding (USB)
 - **Auto-detects** Pi model & architecture (armv7l / arm64)
 - **Interactive** resolution & framerate selector — populated from live camera probe; supports custom values
+- **Resolution-aware framerate defaults** — higher resolution automatically suggests lower fps for better per-frame quality (ideal for bird photography)
+- **Bird quality mode** — optional `--denoise cdn-hq --awb auto` flags for sharper, colour-accurate still captures on Pi cameras
 - **Wi-Fi adaptive** — automatically lowers framerate when signal drops
-- **Home Assistant MQTT discovery** — CPU temp, RAM, stream status sensors + restart/update buttons
+- **Home Assistant MQTT discovery** — CPU temp, RAM, stream status, Wi-Fi quality, resolution, and FPS sensors + restart/update buttons
 - **Auto-update** — daily cron checks this repo for script updates
 - **Systemd managed** — auto-start on boot, restart on failure
 - **Idempotent** — safe to re-run; backs up existing config files
@@ -138,6 +140,47 @@ sudo systemctl status birdcam-wifi-watchdog.timer
 # Manual update check
 sudo /usr/local/bin/birdcam-autoupdate.sh
 ```
+
+## Bird Photography Tips
+
+Lower framerate + higher resolution is the recommended strategy for catching sharp bird images:
+
+| Resolution | Suggested fps | Notes |
+|------------|---------------|-------|
+| 4056×3040 (HQ full) | 5 | Maximum detail; Pi 4/5 recommended |
+| 1920×1080 | 5–10 | Good balance of coverage and detail |
+| 1280×720 | 15–20 | Fine for detection; lower detail |
+
+The setup script automatically suggests lower fps defaults when you pick a higher resolution.
+
+**Bird quality mode** (Pi cameras only) adds two extra rpicam-vid flags:
+
+| Flag | Effect |
+|------|--------|
+| `--denoise cdn-hq` | High-quality chroma-domain noise reduction — noticeably sharper feather detail |
+| `--awb auto` | Automatic white-balance — corrects colour cast in outdoor/shade scenes |
+
+Enable it at the interactive prompt during setup (default: yes). The extra CPU cost is ~5–10 % on a Pi 4.
+
+## MQTT Integration
+
+The MQTT integration is built directly on **`mosquitto_pub` / `mosquitto_sub`** (the standard Mosquitto CLI tools) and implements the [Home Assistant MQTT auto-discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) protocol.  No third-party dashboard like TouchKio is required — all entities appear automatically in the HA device registry once the broker is connected.
+
+### Discovered entities
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| CPU Temperature | Sensor | °C from `/sys/class/thermal` |
+| CPU Usage | Sensor | % from `/proc/stat` |
+| RAM Usage | Sensor | % from `free` |
+| Stream Status | Binary sensor | ON when go2rtc is active |
+| Wi-Fi Quality | Sensor | 0–100 % link quality (iwconfig) |
+| Stream Resolution | Sensor | e.g. `1920x1080` |
+| Stream FPS | Sensor | Configured fps value |
+| Restart Stream | Button | Sends `restart` to command topic |
+| Update Birdcam | Button | Sends `update` to command topic |
+
+State is published every 30 seconds to `birdcam/<hostname>/state`.  Commands are consumed from `birdcam/<hostname>/cmd`.
 
 ## Configuration Files
 

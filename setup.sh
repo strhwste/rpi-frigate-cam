@@ -438,16 +438,25 @@ echo "  6)  30 fps"
 echo "  c)  Custom"
 echo ""
 
-# Default framerate based on Pi model and selected resolution
+# Default framerate based on Pi model AND selected resolution.
+# Higher resolution → lower fps default for better per-frame quality (less
+# motion blur, longer possible exposure) which is ideal for bird photography.
 if [[ "${PI_MODEL}" == "3" ]]; then
-    if   [[ ${WIDTH} -ge 1920 ]]; then DEFAULT_FPS=2   # 10 fps
-    elif [[ ${WIDTH} -ge 1280 ]]; then DEFAULT_FPS=3   # 15 fps
-    else                               DEFAULT_FPS=4   # 20 fps
+    if   [[ ${WIDTH} -ge 1920 ]]; then DEFAULT_FPS=1   # 5 fps
+    elif [[ ${WIDTH} -ge 1280 ]]; then DEFAULT_FPS=2   # 10 fps
+    else                               DEFAULT_FPS=3   # 15 fps
     fi
 elif [[ "${PI_MODEL}" == "4" ]]; then
-    DEFAULT_FPS=4  # 20 fps
-else
-    DEFAULT_FPS=6  # 30 fps
+    if   [[ ${WIDTH} -ge 2560 ]]; then DEFAULT_FPS=1   # 5 fps
+    elif [[ ${WIDTH} -ge 1920 ]]; then DEFAULT_FPS=2   # 10 fps
+    else                               DEFAULT_FPS=4   # 20 fps
+    fi
+else  # Pi 5 / unknown — still scale down at very high resolutions
+    if   [[ ${WIDTH} -ge 3840 ]]; then DEFAULT_FPS=1   # 5 fps
+    elif [[ ${WIDTH} -ge 2560 ]]; then DEFAULT_FPS=2   # 10 fps
+    elif [[ ${WIDTH} -ge 1920 ]]; then DEFAULT_FPS=3   # 15 fps
+    else                               DEFAULT_FPS=6   # 30 fps
+    fi
 fi
 
 read -r -p "Select framerate [1-6/c] (default: ${DEFAULT_FPS}): " FPS_CHOICE
@@ -472,6 +481,26 @@ case "${FPS_CHOICE}" in
 esac
 
 ok "Framerate: ${FPS} fps"
+
+# ─── Bird photography quality flags (Pi camera only) ─────────────────────────
+# High-quality denoise and auto white-balance improve individual frame detail
+# at high resolutions, especially useful for still/close-up bird captures.
+# The extra processing adds ~5-10% CPU but noticeably sharpens images.
+BIRD_QUALITY_FLAGS=""
+if [[ "${CAM_TYPE}" == "pi" ]]; then
+    echo ""
+    echo -e "${BOLD}Bird photography quality optimisation (Pi camera only):${NC}"
+    echo "  Adds --denoise cdn-hq and --awb auto for sharper, colour-accurate frames."
+    echo "  Recommended when fps ≤ 15 and resolution ≥ 1080p."
+    read -r -p "  Enable bird quality flags? [Y/n]: " BIRD_QUALITY
+    BIRD_QUALITY="${BIRD_QUALITY:-y}"
+    if [[ "${BIRD_QUALITY,,}" == "y" ]]; then
+        BIRD_QUALITY_FLAGS="--denoise cdn-hq --awb auto"
+        ok "Bird quality flags enabled (--denoise cdn-hq --awb auto)."
+    else
+        info "Bird quality flags disabled."
+    fi
+fi
 
 # ─── MQTT / Home Assistant configuration (optional) ─────────────────────────
 echo ""
@@ -534,6 +563,7 @@ MQTT_PORT="${MQTT_PORT}"
 MQTT_USER="${MQTT_USER}"
 MQTT_PASS="${MQTT_PASS}"
 MQTT_TOPIC_PREFIX="${MQTT_TOPIC_PREFIX}"
+BIRD_QUALITY_FLAGS="${BIRD_QUALITY_FLAGS}"
 BIRDCAM_EOF
 
 chmod 600 "${BIRDCAM_CONF}"
@@ -624,6 +654,7 @@ else
     # Pi Camera — CAM_CMD includes the exec: prefix for consistency
     CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
     CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
+    [[ -n "${BIRD_QUALITY_FLAGS}" ]] && CAM_CMD+=" ${BIRD_QUALITY_FLAGS}"
     CAM_CMD+=" --libav-format h264"
     CAM_CMD+=" -o -"
 fi
@@ -731,6 +762,7 @@ CAM_DEVICE="${CAM_DEVICE:-}"
 USB_HAS_H264="${USB_HAS_H264:-false}"
 USB_HAS_MJPEG="${USB_HAS_MJPEG:-false}"
 STREAM_NAME="${STREAM_NAME:-birdcam}"
+BIRD_QUALITY_FLAGS="${BIRD_QUALITY_FLAGS:-}"
 
 GO2RTC_YAML="/etc/go2rtc/go2rtc.yaml"
 
@@ -764,7 +796,9 @@ build_cam_cmd() {
             echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
         fi
     else
-        echo "exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps} --libav-format h264 -o -"
+        local quality_flags=""
+        [[ -n "${BIRD_QUALITY_FLAGS}" ]] && quality_flags=" ${BIRD_QUALITY_FLAGS}"
+        echo "exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}${quality_flags} --libav-format h264 -o -"
     fi
 }
 
@@ -929,6 +963,18 @@ publish_discovery() {
     mqtt_pub "${MQTT_TOPIC_PREFIX}/button/${DEVICE_ID}/update/config" \
         "{\"name\":\"Update Birdcam\",\"unique_id\":\"${DEVICE_ID}_update\",\"command_topic\":\"${CMD_TOPIC}\",\"payload_press\":\"update\",\"icon\":\"mdi:update\",\"device\":${DEVICE_JSON}}"
 
+    # Wi-Fi signal quality sensor
+    mqtt_pub "${MQTT_TOPIC_PREFIX}/sensor/${DEVICE_ID}/wifi_quality/config" \
+        "{\"name\":\"Wi-Fi Quality\",\"unique_id\":\"${DEVICE_ID}_wifi_quality\",\"state_topic\":\"${STATE_TOPIC}\",\"value_template\":\"{{ value_json.wifi_quality }}\",\"unit_of_measurement\":\"%\",\"icon\":\"mdi:wifi\",\"device\":${DEVICE_JSON}}"
+
+    # Stream resolution sensor
+    mqtt_pub "${MQTT_TOPIC_PREFIX}/sensor/${DEVICE_ID}/resolution/config" \
+        "{\"name\":\"Stream Resolution\",\"unique_id\":\"${DEVICE_ID}_resolution\",\"state_topic\":\"${STATE_TOPIC}\",\"value_template\":\"{{ value_json.resolution }}\",\"icon\":\"mdi:image-size-select-large\",\"device\":${DEVICE_JSON}}"
+
+    # Stream FPS sensor
+    mqtt_pub "${MQTT_TOPIC_PREFIX}/sensor/${DEVICE_ID}/fps/config" \
+        "{\"name\":\"Stream FPS\",\"unique_id\":\"${DEVICE_ID}_fps\",\"state_topic\":\"${STATE_TOPIC}\",\"value_template\":\"{{ value_json.fps }}\",\"unit_of_measurement\":\"fps\",\"icon\":\"mdi:filmstrip\",\"device\":${DEVICE_JSON}}"
+
     # Availability
     mqtt_pub "${AVAIL_TOPIC}" "online"
 }
@@ -951,9 +997,29 @@ publish_state() {
         stream_status="ON"
     fi
 
+    # Wi-Fi signal quality (0-100; 100 when not applicable / Ethernet)
+    local wifi_quality=100
+    if command -v iwconfig &>/dev/null; then
+        local link
+        link=$(iwconfig 2>/dev/null | grep -i "link quality" | head -1 \
+            | sed 's/.*Link Quality=\([0-9]*\)\/\([0-9]*\).*/\1 \2/')
+        if [[ -n "${link}" ]]; then
+            local num den
+            num=$(echo "${link}" | cut -d' ' -f1)
+            den=$(echo "${link}" | cut -d' ' -f2)
+            if [[ "${den}" -gt 0 ]]; then
+                wifi_quality=$(( num * 100 / den ))
+            fi
+        fi
+    fi
+
+    # Current stream settings from config
+    local cur_fps="${FPS:-0}"
+    local cur_res="${WIDTH:-0}x${HEIGHT:-0}"
+
     local payload
     payload=$(cat <<PEOF
-{"cpu_temp":${cpu_temp},"cpu_usage":${cpu_usage},"ram_usage":${ram_usage},"stream_status":"${stream_status}"}
+{"cpu_temp":${cpu_temp},"cpu_usage":${cpu_usage},"ram_usage":${ram_usage},"stream_status":"${stream_status}","wifi_quality":${wifi_quality},"resolution":"${cur_res}","fps":${cur_fps}}
 PEOF
     )
     mqtt_pub "${STATE_TOPIC}" "${payload}"
