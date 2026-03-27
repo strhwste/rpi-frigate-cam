@@ -374,7 +374,8 @@ install_go2rtc() {
 
     local latest_url
     latest_url=$(curl -fsSL "https://api.github.com/repos/AlexxIT/go2rtc/releases/latest" \
-        | jq -r ".assets[] | select(.name | test(\"go2rtc_linux_${GO2RTC_ARCH}$\")) | .browser_download_url")
+        | jq -r --arg arch "${GO2RTC_ARCH}" \
+          '.assets[] | select(.name == ("go2rtc_linux_" + $arch)) | .browser_download_url')
 
     if [[ -z "${latest_url}" ]]; then
         err "Could not find go2rtc binary for architecture: ${GO2RTC_ARCH}"
@@ -603,7 +604,7 @@ YAML_EOF
 fi
 WIFI_EOF
 
-chmod +x "${WIFI_WATCHDOG_SCRIPT}"
+chmod 700 "${WIFI_WATCHDOG_SCRIPT}"
 ok "Wi-Fi watchdog script created at ${WIFI_WATCHDOG_SCRIPT}"
 
 # Create systemd timer for the Wi-Fi watchdog (every 30 seconds)
@@ -778,7 +779,7 @@ while true; do
 done
 MQTT_DISC_EOF
 
-chmod +x "${MQTT_DISCOVERY_SCRIPT}"
+chmod 700 "${MQTT_DISCOVERY_SCRIPT}"
 ok "MQTT discovery script created at ${MQTT_DISCOVERY_SCRIPT}"
 
 # Systemd service for MQTT discovery
@@ -825,7 +826,8 @@ SETUP_URL="${REPO_RAW}/setup.sh"
 logger -t birdcam-update "Checking for updates..."
 
 # Download latest setup.sh to a temp file
-TMP=$(mktemp)
+TMP=$(mktemp) || exit 1
+chmod 600 "${TMP}"
 if curl -fsSL -o "${TMP}" "${SETUP_URL}" 2>/dev/null; then
     if [[ -f "${LOCAL_SCRIPT}" ]]; then
         if ! diff -q "${TMP}" "${LOCAL_SCRIPT}" &>/dev/null; then
@@ -847,7 +849,7 @@ else
 fi
 AUTOUPDATE_EOF
 
-chmod +x "${AUTOUPDATE_SCRIPT}"
+chmod 700 "${AUTOUPDATE_SCRIPT}"
 
 # Copy current setup.sh as the reference
 cp "$0" /usr/local/bin/birdcam-setup.sh 2>/dev/null || true
