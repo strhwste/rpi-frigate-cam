@@ -568,8 +568,8 @@ fi
 # Only restart if state changed
 if [[ "${NEW_STATE}" != "${PREV_STATE}" ]]; then
     case "${NEW_STATE}" in
-        low)    ADJUSTED_FPS=$(( FPS / 3 > 0 ? FPS / 3 : 5 )) ;;
-        medium) ADJUSTED_FPS=$(( FPS * 2 / 3 > 0 ? FPS * 2 / 3 : 5 )) ;;
+        low)    ADJUSTED_FPS=$(( FPS / 3 )); [[ ${ADJUSTED_FPS} -lt 5 ]] && ADJUSTED_FPS=5 ;;
+        medium) ADJUSTED_FPS=$(( FPS * 2 / 3 )); [[ ${ADJUSTED_FPS} -lt 5 ]] && ADJUSTED_FPS=5 ;;
         normal) ADJUSTED_FPS="${FPS}" ;;
     esac
 
