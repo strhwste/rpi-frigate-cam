@@ -244,7 +244,8 @@ probe_pi_camera() {
     if ! echo "${cam_list}" | grep -qiE "[0-9]{3,}x[0-9]{3,}|imx|ov5647"; then
         return 1
     fi
-    echo "${cam_list}" | grep -oP '[0-9]{3,}x[0-9]{3,}' | sort_resolutions_by_pixels | uniq
+    # Match WxH but exclude crop dimensions (preceded by '/')
+    echo "${cam_list}" | grep -oP '(?<!/)[0-9]{3,}x[0-9]{3,}' | sort_resolutions_by_pixels | uniq
 }
 
 # List USB video capture devices
@@ -679,11 +680,17 @@ if [[ -x "${GO2RTC_BIN}" ]]; then
     LATEST_VER=$(curl -fsSL "https://api.github.com/repos/AlexxIT/go2rtc/releases/latest" \
         | jq -r '.tag_name' 2>/dev/null || echo "unknown")
 
-    if [[ "${INSTALLED_VER}" == *"${LATEST_VER}"* ]]; then
+    # Strip leading 'v' for comparison (--version output has no 'v' prefix)
+    LATEST_VER_STRIPPED="${LATEST_VER#v}"
+
+    if [[ "${INSTALLED_VER}" == *"${LATEST_VER_STRIPPED}"* ]]; then
         ok "go2rtc is already up to date (${LATEST_VER})."
     else
         info "Updating go2rtc from ${INSTALLED_VER} to ${LATEST_VER}..."
+        # Stop the service so the binary is not in use (ETXTBSY)
+        systemctl stop go2rtc.service 2>/dev/null || true
         backup_file "${GO2RTC_BIN}"
+        rm -f "${GO2RTC_BIN}"
         install_go2rtc
     fi
 else
@@ -1463,7 +1470,9 @@ REPO_RAW="https://raw.githubusercontent.com/strhwste/rpi-frigate-cam/main"
 LOCAL_SCRIPT="/usr/local/bin/birdcam-setup.sh"
 SETUP_URL="${REPO_RAW}/setup.sh"
 
-logger -t birdcam-update "Checking for updates..."
+log_msg() { logger -t birdcam-update "$1"; echo "[birdcam-update] $1"; }
+
+log_msg "Checking for updates..."
 
 # Download latest setup.sh to a temp file
 TMP=$(mktemp) || exit 1
@@ -1473,18 +1482,18 @@ if curl -fsSL -o "${TMP}" "${SETUP_URL}" 2>/dev/null; then
         if ! diff -q "${TMP}" "${LOCAL_SCRIPT}" &>/dev/null; then
             cp "${TMP}" "${LOCAL_SCRIPT}"
             chmod +x "${LOCAL_SCRIPT}"
-            logger -t birdcam-update "Updated setup.sh — new version downloaded."
+            log_msg "Updated setup.sh — new version downloaded."
         else
-            logger -t birdcam-update "setup.sh is already up to date."
+            log_msg "setup.sh is already up to date."
         fi
     else
         cp "${TMP}" "${LOCAL_SCRIPT}"
         chmod +x "${LOCAL_SCRIPT}"
-        logger -t birdcam-update "setup.sh installed for the first time."
+        log_msg "setup.sh installed for the first time."
     fi
     rm -f "${TMP}"
 else
-    logger -t birdcam-update "Failed to download update (network issue?)."
+    log_msg "Failed to download update (network issue?)."
     rm -f "${TMP}"
 fi
 AUTOUPDATE_EOF
