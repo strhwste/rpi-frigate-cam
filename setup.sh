@@ -136,7 +136,10 @@ backup_file() {
 # ==============================================================================
 header "Step 1: System Update & Package Installation"
 
-REQUIRED_PKGS=(git curl wget jq ffmpeg mosquitto-clients v4l-utils libraspberrypi-bin)
+REQUIRED_PKGS=(git curl wget jq ffmpeg mosquitto-clients v4l-utils)
+# libraspberrypi-bin provides vcgencmd etc. but is not available on 64-bit
+# Bookworm (conflicts with held packages); treat it as optional.
+OPTIONAL_PKGS=(libraspberrypi-bin)
 
 # Check which packages are already installed
 PKGS_TO_INSTALL=()
@@ -151,17 +154,20 @@ if [[ ${#PKGS_TO_INSTALL[@]} -gt 0 ]]; then
     apt-get update -qq
 
     info "Installing missing packages: ${PKGS_TO_INSTALL[*]}"
-    apt-get install -y -qq "${PKGS_TO_INSTALL[@]}" || {
-        # libraspberrypi-bin may not be available on 64-bit; retry without it
-        warn "Some packages failed. Retrying without libraspberrypi-bin..."
-        PKGS_TO_INSTALL=("${PKGS_TO_INSTALL[@]/libraspberrypi-bin/}")
-        PKGS_TO_INSTALL=("${PKGS_TO_INSTALL[@]}")  # re-compact
-        apt-get install -y -qq "${PKGS_TO_INSTALL[@]}"
-    }
+    apt-get install -y -qq "${PKGS_TO_INSTALL[@]}"
     ok "Packages installed."
 else
     ok "All required packages already installed."
 fi
+
+# Install optional packages individually so a failure does not break the rest
+for pkg in "${OPTIONAL_PKGS[@]}"; do
+    if ! dpkg -l "${pkg}" 2>/dev/null | grep -q '^ii'; then
+        info "Installing optional package: ${pkg}"
+        apt-get install -y -qq "${pkg}" 2>/dev/null \
+            || warn "Optional package ${pkg} could not be installed (skipping)."
+    fi
+done
 
 # ==============================================================================
 # 2. ENABLE CAMERA INTERFACE
