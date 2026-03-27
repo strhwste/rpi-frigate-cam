@@ -58,6 +58,9 @@ BACKUP_DIR="/etc/birdcam-backups"
 STREAM_NAME="birdcam"
 RTSP_PORT="8554"
 WEBRTC_PORT="8555"
+DEFAULT_SUB_WIDTH=640
+DEFAULT_SUB_HEIGHT=480
+DEFAULT_SUB_FPS=5
 
 # ─── Root / sudo check ──────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -531,13 +534,13 @@ SUB_HEIGHT=""
 SUB_FPS=""
 
 if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
-    # Auto-calculate sub-stream resolution: 640px wide, aspect-ratio-preserved
-    SUB_WIDTH=640
-    SUB_HEIGHT=$(( WIDTH > 0 ? (640 * HEIGHT / WIDTH + 1) / 2 * 2 : 480 ))
+    # Auto-calculate sub-stream resolution: DEFAULT_SUB_WIDTH wide, aspect-ratio-preserved
+    SUB_WIDTH=${DEFAULT_SUB_WIDTH}
+    SUB_HEIGHT=$(( WIDTH > 0 ? (DEFAULT_SUB_WIDTH * HEIGHT / WIDTH + 1) / 2 * 2 : DEFAULT_SUB_HEIGHT ))
     # Ensure minimum height of 2 and reasonable bounds
-    [[ "${SUB_HEIGHT}" -lt 2 ]] && SUB_HEIGHT=480
-    [[ "${SUB_HEIGHT}" -gt 640 ]] && SUB_HEIGHT=480
-    SUB_FPS=5
+    [[ "${SUB_HEIGHT}" -lt 2 ]] && SUB_HEIGHT=${DEFAULT_SUB_HEIGHT}
+    [[ "${SUB_HEIGHT}" -gt ${DEFAULT_SUB_WIDTH} ]] && SUB_HEIGHT=${DEFAULT_SUB_HEIGHT}
+    SUB_FPS=${DEFAULT_SUB_FPS}
 
     echo ""
     echo -e "  Auto-calculated sub-stream: ${CYAN}${SUB_WIDTH}x${SUB_HEIGHT} @ ${SUB_FPS} fps${NC}"
@@ -551,8 +554,8 @@ if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
             SUB_HEIGHT=$(echo "${SUB_CUSTOM_RES}" | cut -d'x' -f2)
             if ! [[ "${SUB_WIDTH}" =~ ^[0-9]+$ && "${SUB_HEIGHT}" =~ ^[0-9]+$ \
                    && "${SUB_WIDTH}" -gt 0 && "${SUB_HEIGHT}" -gt 0 ]]; then
-                warn "Invalid sub-stream resolution; using 640x480"
-                SUB_WIDTH=640; SUB_HEIGHT=480
+                warn "Invalid sub-stream resolution; using ${DEFAULT_SUB_WIDTH}x${DEFAULT_SUB_HEIGHT}"
+                SUB_WIDTH=${DEFAULT_SUB_WIDTH}; SUB_HEIGHT=${DEFAULT_SUB_HEIGHT}
             fi
         fi
         read -r -p "  Sub-stream FPS [5]: " SUB_FPS_INPUT
@@ -560,7 +563,7 @@ if [[ "${ENABLE_SUB_STREAM,,}" == "y" ]]; then
            && [[ "${SUB_FPS_INPUT}" -ge 1 ]]; then
             SUB_FPS="${SUB_FPS_INPUT}"
         else
-            SUB_FPS=5
+            SUB_FPS=${DEFAULT_SUB_FPS}
         fi
     fi
 
