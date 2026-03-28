@@ -61,6 +61,8 @@ WEBRTC_PORT="8555"
 DEFAULT_SUB_WIDTH=640
 DEFAULT_SUB_HEIGHT=480
 DEFAULT_SUB_FPS=5
+OV5647_DEFAULT_WIDTH=1296
+OV5647_DEFAULT_HEIGHT=972
 
 # ─── Root / sudo check ──────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -255,6 +257,18 @@ probe_pi_camera() {
     echo "${cam_list}" | grep -oP '(?<!/)[0-9]{3,}x[0-9]{3,}' | sort_resolutions_by_pixels | uniq
 }
 
+is_ov5647_camera() {
+    local probe_cmd=""
+    if command -v rpicam-hello &>/dev/null; then
+        probe_cmd="rpicam-hello"
+    elif command -v libcamera-hello &>/dev/null; then
+        probe_cmd="libcamera-hello"
+    else
+        return 1
+    fi
+    "${probe_cmd}" --list-cameras 2>&1 | grep -qi "ov5647"
+}
+
 # List USB video capture devices
 probe_usb_cameras() {
     for dev in /dev/video*; do
@@ -287,6 +301,7 @@ CAM_TYPE="pi"
 CAM_TOOL=""
 CAM_DEVICE=""
 DETECTED_RESOLUTIONS=()
+OV5647_CAMERA="false"
 
 # Always resolve the Pi camera tool binary
 if command -v rpicam-vid &>/dev/null; then
@@ -331,6 +346,9 @@ usb_dev_list=$(probe_usb_cameras 2>/dev/null || true)
 
 if [[ -n "${pi_res}" ]]; then
     CAM_TYPE="pi"
+    if is_ov5647_camera; then
+        OV5647_CAMERA="true"
+    fi
     while IFS= read -r r; do
         [[ -n "${r}" ]] && DETECTED_RESOLUTIONS+=("${r}")
     done <<< "${pi_res}"
@@ -407,19 +425,27 @@ if [[ ${#DETECTED_RESOLUTIONS[@]} -gt 0 ]]; then
     echo "  c) Enter custom resolution"
     echo ""
     HIGHEST_RES="${DETECTED_RESOLUTIONS[0]}"
-    read -r -p "Select resolution [1-${#DETECTED_RESOLUTIONS[@]}/c] (default: 1 = ${HIGHEST_RES}): " RES_CHOICE
-    RES_CHOICE="${RES_CHOICE:-1}"
+    DEFAULT_RES="${HIGHEST_RES}"
+    if [[ "${OV5647_CAMERA}" == "true" ]]; then
+        DEFAULT_RES="${OV5647_DEFAULT_WIDTH}x${OV5647_DEFAULT_HEIGHT}"
+        info "OV5647 detected. ${DEFAULT_RES} is the recommended RTSP default on newer Pi OS."
+    fi
+    read -r -p "Select resolution [1-${#DETECTED_RESOLUTIONS[@]}/c] (default: ${DEFAULT_RES}): " RES_CHOICE
 
-    if [[ "${RES_CHOICE}" == "c" || "${RES_CHOICE}" == "C" ]]; then
+    if [[ -z "${RES_CHOICE}" ]] && [[ "${OV5647_CAMERA}" == "true" ]]; then
+        WIDTH=${OV5647_DEFAULT_WIDTH}
+        HEIGHT=${OV5647_DEFAULT_HEIGHT}
+    elif [[ "${RES_CHOICE}" == "c" || "${RES_CHOICE}" == "C" ]]; then
         read -r -p "  Enter resolution (e.g. 1280x720): " CUSTOM_RES
         WIDTH=$(echo "${CUSTOM_RES}" | cut -d'x' -f1)
         HEIGHT=$(echo "${CUSTOM_RES}" | cut -d'x' -f2)
         if ! [[ "${WIDTH}" =~ ^[0-9]+$ && "${HEIGHT}" =~ ^[0-9]+$ && "${WIDTH}" -gt 0 && "${HEIGHT}" -gt 0 ]]; then
-            warn "Invalid resolution; using detected highest: ${HIGHEST_RES}"
-            WIDTH=$(echo "${HIGHEST_RES}" | cut -d'x' -f1)
-            HEIGHT=$(echo "${HIGHEST_RES}" | cut -d'x' -f2)
+            warn "Invalid resolution; using default: ${DEFAULT_RES}"
+            WIDTH=$(echo "${DEFAULT_RES}" | cut -d'x' -f1)
+            HEIGHT=$(echo "${DEFAULT_RES}" | cut -d'x' -f2)
         fi
     else
+        RES_CHOICE="${RES_CHOICE:-1}"
         chosen_res="${DETECTED_RESOLUTIONS[$((RES_CHOICE - 1))]:-${HIGHEST_RES}}"
         WIDTH=$(echo "${chosen_res}" | cut -d'x' -f1)
         HEIGHT=$(echo "${chosen_res}" | cut -d'x' -f2)
@@ -554,14 +580,14 @@ fi
 # The sub-stream is derived from the main via go2rtc's ffmpeg transcoding,
 # so no second camera process is needed.
 echo ""
-echo -e "${BOLD}Sub-stream for Frigate detection (recommended):${NC}"
+echo -e "${BOLD}Sub-stream for Frigate detection (optional):${NC}"
 echo "  Creates a low-resolution detection stream (${STREAM_NAME}_sub) alongside"
 echo "  the main stream. Frigate uses the sub-stream for object detection and the"
 echo "  main stream for recording/live view, reducing CPU usage significantly."
 echo "  The sub-stream is derived from the main stream inside go2rtc (no extra"
 echo "  camera process required)."
-read -r -p "  Enable sub-stream for detection? [Y/n]: " ENABLE_SUB_STREAM
-ENABLE_SUB_STREAM="${ENABLE_SUB_STREAM:-y}"
+read -r -p "  Enable sub-stream for detection? [y/N]: " ENABLE_SUB_STREAM
+ENABLE_SUB_STREAM="${ENABLE_SUB_STREAM:-n}"
 
 SUB_WIDTH=""
 SUB_HEIGHT=""
@@ -742,11 +768,11 @@ backup_file "${GO2RTC_YAML}"
 # ── Pi Camera (rpicam-vid) ───────────────────────────────────────────────────
 #   --codec h264    — hardware H.264 encoder
 #   --inline        — Annex-B H.264 (SPS/PPS before every IDR)
-#   --flush         — flush output after every frame (prevents pipe EOF)
 #   --nopreview     — headless
 #   --timeout 0     — run indefinitely
 #   --width/--height/--framerate
 #   -o - — pipe raw H.264 to stdout for go2rtc
+#   Avoid --flush here: newer Bookworm 2025/2026 firmware can hit exec/pipe EOF
 #
 # ── USB Camera (ffmpeg + v4l2) ───────────────────────────────────────────────
 #   Prefer native H.264 (copy), then MJPEG→H.264, then raw→H.264 (SW encode)
@@ -772,7 +798,7 @@ if [[ "${CAM_TYPE}" == "usb" ]]; then
     fi
 else
     # Pi Camera — CAM_CMD includes the exec: prefix for consistency
-    CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0"
+    CAM_CMD="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
     CAM_CMD+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
     CAM_CMD+="$(build_pi_camera_tuning_flags)"
     CAM_CMD+=" -o -"
@@ -963,7 +989,7 @@ build_cam_cmd() {
             echo "exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${fps} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
         fi
     else
-        local pi_cmd="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}"
+        local pi_cmd="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${fps}"
         pi_cmd+="$(build_pi_camera_tuning_flags)"
         pi_cmd+=" -o -"
         echo "${pi_cmd}"
@@ -1325,7 +1351,7 @@ rebuild_go2rtc_config() {
             cam_cmd="exec:ffmpeg -hide_banner -loglevel warning -f v4l2 -video_size ${WIDTH}x${HEIGHT} -framerate ${FPS} -i ${CAM_DEVICE} -c:v libx264 -preset ultrafast -tune zerolatency -f h264 -"
         fi
     else
-        cam_cmd="exec:${CAM_TOOL} --codec h264 --inline --flush --nopreview --timeout 0"
+        cam_cmd="exec:${CAM_TOOL} --codec h264 --inline --nopreview --timeout 0"
         cam_cmd+=" --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS}"
         cam_cmd+="$(build_pi_camera_tuning_flags)"
         cam_cmd+=" -o -"
