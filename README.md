@@ -6,9 +6,9 @@ Turn a Raspberry Pi (3/4/5) with **any camera** into a dedicated, low-resource R
 
 - **One-command setup** — `sudo bash setup.sh` does everything
 - **Universal camera support** — Pi Camera V1/V2/HQ/GS, USB webcams, and any V4L2 device
-- **Auto-detects camera resolutions** — queries the camera and defaults to the highest available
+- **Auto-detects camera resolutions** — queries the camera and defaults to the highest available, with a safer OV5647 recommendation on newer Pi OS
 - **go2rtc** RTSP / WebRTC streaming with hardware H.264 encoding (Pi cameras) or software encoding (USB)
-- **Multi-stream support** — automatic main + sub stream (high-res for recording/live, low-res for detection) using go2rtc's built-in ffmpeg transcoding
+- **Optional multi-stream support** — choose whether setup creates a main + sub stream (high-res for recording/live, low-res for detection) using go2rtc's built-in ffmpeg transcoding
 - **WebRTC with STUN** — improved WebRTC connectivity with automatic ICE candidate configuration
 - **Frigate integration options** — standalone go2rtc on the Pi, Frigate restream, or Frigate's bundled go2rtc
 - **Auto-detects** Pi model & architecture (armv7l / arm64)
@@ -33,7 +33,7 @@ cd rpi-frigate-cam
 sudo bash setup.sh
 ```
 
-The script will auto-detect your camera and its supported resolutions, defaulting to the highest available. You can override the selection interactively.
+The script will auto-detect your camera and its supported resolutions, defaulting to the highest available in most cases. For Pi Camera V1 (OV5647) on newer Pi OS builds, setup recommends a safer `1296x972` RTSP default. You can override the selection interactively.
 
 ## Requirements
 
@@ -85,7 +85,7 @@ http://<PI_IP>:1984/
 
 ### Add to Frigate (multi-stream, recommended)
 
-When the sub-stream is enabled (default), the setup creates both a high-resolution `birdcam` stream (for recording/live view) and a low-resolution `birdcam_sub` stream (for detection). This is the recommended Frigate configuration:
+When you enable the optional sub-stream during setup, the Pi creates both a high-resolution `birdcam` stream (for recording/live view) and a low-resolution `birdcam_sub` stream (for detection). This is the recommended Frigate configuration:
 
 ```yaml
 go2rtc:
@@ -244,7 +244,7 @@ The setup script automatically suggests lower fps defaults when you pick a highe
 
 Enable bird quality mode at the interactive prompt during setup (default: yes). The extra CPU cost is ~5–10 % on a Pi 4.
 
-On older Raspberry Pi camera-app builds, unsupported tuning flags are skipped automatically so the main `rpicam-vid` stream still starts cleanly instead of exiting with `exec/pipe: EOF`.
+On newer Raspberry Pi OS Bookworm builds, the Pi Camera V1 (OV5647) now defaults to a safer `1296x972` RTSP recommendation during setup, and the generated `rpicam-vid` command keeps `--inline` but no longer uses `--flush`, which avoids the `exec/pipe: EOF` failure seen on some newer firmware.
 
 ## MQTT Integration
 
