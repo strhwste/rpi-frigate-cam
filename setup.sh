@@ -772,7 +772,7 @@ backup_file "${GO2RTC_YAML}"
 #   --timeout 0     — run indefinitely
 #   --width/--height/--framerate
 #   -o - — pipe raw H.264 to stdout for go2rtc
-#   Avoid --flush here: newer Bookworm firmware can hit exec/pipe EOF on stdout
+#   Avoid --flush here: newer Bookworm 2025/2026 firmware can hit exec/pipe EOF
 #
 # ── USB Camera (ffmpeg + v4l2) ───────────────────────────────────────────────
 #   Prefer native H.264 (copy), then MJPEG→H.264, then raw→H.264 (SW encode)
